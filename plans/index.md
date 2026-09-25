@@ -132,7 +132,7 @@ Planning probes changed REQUIREMENTS.md in two places. Both are already applied 
 | Plan | Status |
 |---|---|
 | 01 | Done (5681d43) — added `conftest.py` at repo root (not listed in Plan 01's file table) so `uv run pytest` can `import monitor` without packaging the script; no other deviations |
-| 02 | Done (pending commit) — no deviations; live tests confirmed Claude's Cowork VM (coalition 11603) matched and Docker's VM (coalition 11507) excluded on this run |
+| 02 | Done (84efa5c) — no deviations; live tests confirmed Claude's Cowork VM (coalition 11603) matched and Docker's VM (coalition 11507) excluded on this run |
 | 03 | Not started |
 | 04 | Not started |
 | 05 | Not started |
