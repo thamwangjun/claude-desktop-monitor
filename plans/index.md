@@ -131,7 +131,7 @@ Planning probes changed REQUIREMENTS.md in two places. Both are already applied 
 
 | Plan | Status |
 |---|---|
-| 01 | Not started |
+| 01 | Done (5681d43) — added `conftest.py` at repo root (not listed in Plan 01's file table) so `uv run pytest` can `import monitor` without packaging the script; no other deviations |
 | 02 | Not started (risk retired by probe) |
 | 03 | Not started |
 | 04 | Not started |
