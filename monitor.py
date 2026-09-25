@@ -9,23 +9,33 @@ deletes or restarts anything it observes.
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import platform
 import re
+import select
 import signal
 import stat as stat_module
 import subprocess
 import sys
+import termios
 import threading
 import time
+import tty
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import psutil
+from rich import box
+from rich.console import Console, Group
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
@@ -1595,6 +1605,7 @@ class Analyzer:
         self._raised: set[str] = set()
         self._active_partials: set[str] = set()
 
+        self._write_totals: dict[str, float] = {}
         self._write_buckets: dict[int, float] = {}
         self._bundle_rate_window = TimeWindow(_BUNDLE_RATE_WINDOW_S, self.interval)
         self._bundle_growth_start: float | None = None
@@ -1646,6 +1657,7 @@ class Analyzer:
         bundle_total_alloc = derived["bundle:total:alloc"]["cur"]
         self._bundle_flags(events, elapsed, bundle, bundle_total_alloc)
         self._swap_streak_flag(events, swapouts)
+        derived["swap_streak"] = self._swap_streak
         self._attribution_flag(events, sample.get("processes") or [])
         self._diag_events(events, sample.get("diag") or {})
 
@@ -1691,6 +1703,11 @@ class Analyzer:
         derived[wr_id] = wr_out
 
         derived[rd_id] = self._series_for(rd_id, None).update(elapsed, metrics.get("read_rate"))
+
+        write_delta = metrics.get("write_delta")
+        if write_delta:
+            self._write_totals[suffix] = self._write_totals.get(suffix, 0.0) + write_delta
+        derived[f"wrsum:{suffix}"] = self._write_totals.get(suffix, 0.0)
 
         self._cpu_flag(events, suffix, cpu_id, cpu_out)
         self._mem_flag(events, suffix, mem_id, mem_out)
@@ -1935,6 +1952,487 @@ class HeadlessRenderer:
         pass
 
 
+# -- TUI formatting helpers --
+
+_PATH_ROW_NAMES = (
+    "vm_bundles", "vm_warm", "cache", "code_cache", "claude_code_vm",
+    "agent_sessions", "indexeddb", "gpucache", "support_total",
+)
+_BUNDLE_DISPLAY_ROWS = (
+    ("rootfs.img", "rootfs.img"), ("sessiondata.img", "sessiondata.img"),
+    ("other", "other"), ("total", "bundle total"),
+)
+
+
+def _fmt_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "n/a"
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:d}:{m:02d}:{s:02d}"
+
+
+def _fmt_cpu(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.1f}%"
+
+
+def _fmt_rate(value: float | None) -> str:
+    return "n/a" if value is None else f"{format_bytes(value)}/s"
+
+
+def _fmt_delta(value: float | None, unit: str = "bytes") -> str:
+    if value is None:
+        return "n/a"
+    if value == 0:
+        return "·"
+    sign = "+" if value > 0 else "−"
+    if unit == "pct":
+        return f"{sign}{abs(value):.1f}%"
+    return f"{sign}{format_bytes(abs(value))}"
+
+
+def _fmt_baseline(baseline, kind: str) -> str:
+    if baseline is None or baseline == "warming":
+        return "…"
+    return f"{baseline:.1f}%" if kind == "cpu" else format_bytes(baseline)
+
+
+def _fmt_vs_baseline(vs_baseline: float | None, kind: str) -> str:
+    if vs_baseline is None:
+        return "…"
+    return _fmt_delta(vs_baseline, "pct") if kind == "cpu" else _fmt_delta(vs_baseline * 100, "pct")
+
+
+class TuiRenderer:
+    """Live `rich` dashboard (§8, Plan 07). Computes no analysis of its own;
+    every value shown comes from the sample or `derived` passed to render()."""
+
+    def __init__(self, args: argparse.Namespace, log_path: str):
+        self.args = args
+        self._log_path = log_path
+        self._console = Console()
+        self._live: Live | None = None
+        self._show_pids = False
+        self._is_tty_stdin = sys.stdin.isatty()
+        self._orig_termios = None
+        self._pending_marker: str | None = None
+        self._flag_info: dict[str, dict] = {}
+        self._event_log: list[tuple[float, dict]] = []
+        self._historic_diag: list[dict] = []
+        self._last_sample: dict | None = None
+        self._last_derived: dict | None = None
+        self._last_active_flags: list[str] = []
+        self._start_wall = None
+        atexit.register(self._restore_terminal)
+
+    # -- Renderer contract --
+
+    def start(self) -> None:
+        self._start_wall = datetime.now().astimezone()
+        if self._is_tty_stdin:
+            try:
+                self._orig_termios = termios.tcgetattr(sys.stdin.fileno())
+                tty.setcbreak(sys.stdin.fileno())
+            except (termios.error, ValueError, OSError):
+                self._is_tty_stdin = False
+                self._orig_termios = None
+        self._live = Live(console=self._console, auto_refresh=False, screen=True,
+                           transient=False, vertical_overflow="crop")
+        self._live.start()
+
+    def render(self, sample: dict, derived: dict, active_flags: list[str]) -> None:
+        self._last_sample = sample
+        self._last_derived = derived
+        self._last_active_flags = active_flags
+        if (sample.get("diag") or {}).get("historic"):
+            self._historic_diag = sample["diag"]["historic"]
+        renderable = self._build_renderable(sample, derived, active_flags)
+        if self._live is not None:
+            self._live.update(renderable, refresh=True)
+
+    def on_flag(self, event: dict) -> None:
+        now = time.monotonic()
+        self._event_log.append((now, event))
+        cutoff = now - 600.0
+        self._event_log = [(t, e) for t, e in self._event_log if t >= cutoff]
+        flag_id = event.get("id")
+        if event.get("state") == "raised":
+            self._flag_info[flag_id] = {"message": event.get("message"), "raised_at": now}
+        elif event.get("state") == "cleared":
+            self._flag_info.pop(flag_id, None)
+
+    def poll_keys(self, timeout: float) -> list[str]:
+        if not self._is_tty_stdin:
+            if timeout > 0:
+                time.sleep(timeout)
+            return []
+        keys: list[str] = []
+        deadline = time.monotonic() + max(timeout, 0.0)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                ready, _, _ = select.select([sys.stdin], [], [], remaining)
+            except (OSError, ValueError):
+                break
+            if not ready:
+                break
+            try:
+                ch = sys.stdin.read(1)
+            except OSError:
+                break
+            if not ch:
+                break
+            if ch == "q":
+                keys.append("q")
+                break
+            elif ch == "p":
+                self._show_pids = not self._show_pids
+                keys.append("p")
+                self._rerender_last()
+            elif ch == "b":
+                keys.append("b")
+            elif ch == "m":
+                self._pending_marker = self._prompt_marker()
+                keys.append("m")
+        return keys
+
+    def stop(self) -> None:
+        if self._live is not None:
+            try:
+                self._live.stop()
+            except Exception:
+                pass
+            self._live = None
+        self._restore_terminal()
+
+    def take_pending_marker(self) -> str | None:
+        label = self._pending_marker
+        self._pending_marker = None
+        return label
+
+    # -- terminal handling --
+
+    def _restore_terminal(self) -> None:
+        if self._orig_termios is not None and self._is_tty_stdin:
+            try:
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._orig_termios)
+            except (termios.error, OSError):
+                pass
+
+    def _prompt_marker(self) -> str:
+        if self._live is not None:
+            try:
+                self._live.stop()
+            except Exception:
+                pass
+        self._restore_terminal()
+        try:
+            label = input("Marker label (Enter for none): ")
+        except (EOFError, OSError):
+            label = ""
+        if self._is_tty_stdin:
+            try:
+                tty.setcbreak(sys.stdin.fileno())
+            except (termios.error, OSError, ValueError):
+                pass
+        if self._live is not None:
+            try:
+                self._live.start()
+            except Exception:
+                pass
+        self._rerender_last()
+        return label.strip()
+
+    def _rerender_last(self) -> None:
+        if self._last_sample is not None:
+            self.render(self._last_sample, self._last_derived or {}, self._last_active_flags)
+
+    # -- rendering --
+
+    def _build_renderable(self, sample: dict, derived: dict, active_flags: list[str]):
+        active = set(active_flags)
+        body = self._build_body(sample, derived, active)
+        header = self._build_header(sample, hidden_rows=0)
+        combined = Group(header, body)
+        height = self._console.size.height
+        hidden = 0
+        if height:
+            try:
+                lines = self._console.render_lines(combined, self._console.options.update(height=None))
+                hidden = max(0, len(lines) - height)
+            except Exception:
+                hidden = 0
+        if hidden:
+            header = self._build_header(sample, hidden_rows=hidden)
+            combined = Group(header, body)
+        return combined
+
+    def _build_header(self, sample: dict, hidden_rows: int):
+        claude = sample.get("claude") or {}
+        running = claude.get("running")
+        status = "running" if running else "not running"
+        version = _claude_app_version() or "n/a"
+        main_pid = claude.get("main_pid")
+        cid = claude.get("coalition_id")
+        elapsed = sample.get("elapsed") or 0.0
+        start_str = self._start_wall.strftime("%Y-%m-%d %H:%M:%S %Z") if self._start_wall else "n/a"
+        lines = [
+            f"Session start: {start_str}  Elapsed: {_fmt_duration(elapsed)}  "
+            f"Interval: {self.args.interval:.0f}s  Log: {self._log_path}",
+            f"Claude: {status}  App: {version}  "
+            f"Main PID: {main_pid if main_pid is not None else 'n/a'}  "
+            f"Coalition: {cid if cid is not None else 'n/a'}  "
+            f"trace-io: {'on' if self.args.trace_io else 'off'}",
+            f"q quit · p PIDs ({'shown' if self._show_pids else 'hidden'}) · m marker · b reset"
+            + ("" if self._is_tty_stdin else "  (keys disabled: stdin is not a TTY)"),
+        ]
+        if hidden_rows:
+            lines.append(f"(terminal too small: {hidden_rows} rows hidden)")
+        return Panel("\n".join(lines), title="claude-desktop-monitor")
+
+    def _build_body(self, sample: dict, derived: dict, active: set[str]):
+        left = [
+            Panel(self._cpu_table(sample, derived, active), title="CPU (% of one core)"),
+            Panel(self._mem_table(sample, derived, active), title="Memory"),
+            Panel(self._io_table(sample, derived, active), title="Disk I/O"),
+        ]
+        if self.args.include_cli and sample.get("cli"):
+            left.append(Panel(self._cli_table(sample), title="Claude Code CLI"))
+        right = [
+            Panel(self._footprint_table(sample, derived, active), title="Disk footprint"),
+            Panel(self._system_table(sample, derived, active), title="System"),
+            Panel(self._flags_renderable(sample, active), title="Flags and events"),
+        ]
+        if self._console.size.width >= 160:
+            grid = Table.grid(expand=True, padding=(0, 1))
+            grid.add_column(ratio=1)
+            grid.add_column(ratio=1)
+            grid.add_row(Group(*left), Group(*right))
+            return grid
+        return Group(*left, *right)
+
+    def _role_order(self, sample: dict) -> list[str]:
+        return ["total"] + sorted((sample.get("roles") or {}).keys())
+
+    def _add_pid_subrows(
+        self, table: Table, sample: dict, suffix: str, value_col: int, value_fn: Callable[[dict], str],
+    ) -> None:
+        n_cols = len(table.columns)
+        processes = sorted(
+            (p for p in (sample.get("processes") or []) if p.get("role") == suffix),
+            key=lambda p: p.get("pid") or 0,
+        )
+        for proc in processes:
+            attribution = proc.get("attribution")
+            attr_label = "?" if attribution == "name?" else (attribution or "")
+            exe_name = Path(proc["exe"]).name if proc.get("exe") else "n/a"
+            row = [""] * n_cols
+            row[0] = f"  {proc.get('pid')} {exe_name} [{attr_label}]"
+            row[value_col] = value_fn(proc)
+            table.add_row(*row, style="yellow" if attribution == "name?" else "dim")
+
+    def _cpu_table(self, sample: dict, derived: dict, active: set[str]) -> Table:
+        table = Table(box=box.SIMPLE_HEAVY, expand=True)
+        for col in ("Role", "n", "Current", "Δpoll", "Δstart", "Peak", "Avg(60s)", "Baseline", "vs base"):
+            table.add_column(col, justify="left" if col == "Role" else "right")
+        roles = sample.get("roles") or {}
+        for suffix in self._role_order(sample):
+            out = derived.get(f"cpu:{suffix}")
+            if out is None:
+                continue
+            n = sample.get("total", {}).get("count") if suffix == "total" else (roles.get(suffix) or {}).get("count")
+            flag_id = f"cpu:{suffix}"
+            style = "red" if flag_id in active else ("bold" if suffix == "total" else None)
+            table.add_row(
+                suffix, str(n) if n is not None else "n/a",
+                _fmt_cpu(out["cur"]), _fmt_delta(out["d_poll"], "pct"), _fmt_delta(out["d_start"], "pct"),
+                _fmt_cpu(out["peak"]), _fmt_cpu(out["avg"]),
+                _fmt_baseline(out["baseline"], "cpu"), _fmt_vs_baseline(out["vs_baseline"], "cpu"),
+                style=style,
+            )
+            if self._show_pids:
+                self._add_pid_subrows(table, sample, suffix, 2, lambda p: _fmt_cpu(p.get("cpu_pct")))
+        return table
+
+    def _mem_table(self, sample: dict, derived: dict, active: set[str]) -> Table:
+        table = Table(box=box.SIMPLE_HEAVY, expand=True)
+        for col in ("Role", "Footprint", "Δpoll", "Δstart", "Peak", "RSS", "Avg(5m)", "vs base"):
+            table.add_column(col, justify="left" if col == "Role" else "right")
+        for suffix in self._role_order(sample):
+            out = derived.get(f"mem:{suffix}")
+            if out is None:
+                continue
+            rss = derived.get(f"rss:{suffix}") or {}
+            flag_id = f"mem:{suffix}"
+            style = "red" if flag_id in active else ("bold" if suffix == "total" else None)
+            table.add_row(
+                suffix, format_bytes(out["cur"]), _fmt_delta(out["d_poll"]), _fmt_delta(out["d_start"]),
+                format_bytes(out["peak"]), format_bytes(rss.get("cur")), format_bytes(out["avg"]),
+                _fmt_vs_baseline(out["vs_baseline"], "mem"),
+                style=style,
+            )
+            if self._show_pids:
+                def _mem_value(p: dict) -> str:
+                    val = p.get("footprint")
+                    if val is None:
+                        val = p.get("rss")
+                    return format_bytes(val)
+                self._add_pid_subrows(table, sample, suffix, 1, _mem_value)
+        return table
+
+    def _io_table(self, sample: dict, derived: dict, active: set[str]) -> Group:
+        table = Table(box=box.SIMPLE_HEAVY, expand=True)
+        for col in ("Role", "Write/s", "Avg(60s)", "Read/s", "Written (session)", "Peak write/s"):
+            table.add_column(col, justify="left" if col == "Role" else "right")
+        for suffix in self._role_order(sample):
+            wr = derived.get(f"wr:{suffix}")
+            if wr is None:
+                continue
+            rd = derived.get(f"rd:{suffix}") or {}
+            written = derived.get(f"wrsum:{suffix}")
+            flag_id = f"wr:{suffix}"
+            style = "red" if flag_id in active else ("bold" if suffix == "total" else None)
+            table.add_row(
+                suffix, _fmt_rate(wr["cur"]), _fmt_rate(wr.get("avg")), _fmt_rate(rd.get("cur")),
+                format_bytes(written), _fmt_rate(wr["peak"]),
+                style=style,
+            )
+            if self._show_pids:
+                interval = self.args.interval
+
+                def _write_rate(p: dict, interval: float = interval) -> str:
+                    delta = p.get("write_delta")
+                    return _fmt_rate(delta / interval if delta is not None and interval else None)
+
+                self._add_pid_subrows(table, sample, suffix, 1, _write_rate)
+        budget = derived.get("write_budget") or {}
+        footer = Text(
+            f"24h written: {format_bytes(budget.get('bytes'))} "
+            f"({budget.get('pct_2g', 0.0):.1f}% of 2 GiB · {budget.get('pct_8g', 0.0):.1f}% of 8 GiB)"
+        )
+        return Group(table, footer)
+
+    def _footprint_table(self, sample: dict, derived: dict, active: set[str]) -> Table:
+        table = Table(box=box.SIMPLE_HEAVY, expand=True)
+        for col in ("Path", "Allocated", "Apparent", "Δpoll", "Δstart", "Peak"):
+            table.add_column(col, justify="left" if col == "Path" else "right")
+        bundle_present = bool((sample.get("bundle") or {}).get("present"))
+        bundle_active = ("bundle:growth" in active) or ("bundle:rate" in active)
+        for row_name, label in _BUNDLE_DISPLAY_ROWS:
+            if not bundle_present:
+                table.add_row(label, "absent", "absent", "·", "·", "absent", style="dim")
+                continue
+            alloc = derived.get(f"bundle:{row_name}:alloc") or {}
+            app = derived.get(f"bundle:{row_name}:app") or {}
+            style = "red" if (row_name == "total" and bundle_active) else None
+            table.add_row(
+                label, format_bytes(alloc.get("cur")), format_bytes(app.get("cur")),
+                _fmt_delta(alloc.get("d_poll")), _fmt_delta(alloc.get("d_start")), format_bytes(alloc.get("peak")),
+                style=style,
+            )
+        paths = sample.get("paths") or {}
+        for name in _PATH_ROW_NAMES:
+            info = paths.get(name) or {}
+            present = bool(info.get("present"))
+            if not present:
+                table.add_row(name, "absent", "absent", "·", "·", "absent", style="dim")
+                continue
+            alloc = derived.get(f"path:{name}:alloc") or {}
+            app = derived.get(f"path:{name}:app") or {}
+            style = "red" if (name == "vm_bundles" and bundle_active) else None
+            table.add_row(
+                name, format_bytes(alloc.get("cur")), format_bytes(app.get("cur")),
+                _fmt_delta(alloc.get("d_poll")), _fmt_delta(alloc.get("d_start")), format_bytes(alloc.get("peak")),
+                style=style,
+            )
+        return table
+
+    def _system_table(self, sample: dict, derived: dict, active: set[str]) -> Table:
+        table = Table(box=box.SIMPLE_HEAVY, expand=True)
+        table.add_column("Metric")
+        table.add_column("Value", justify="right")
+        table.add_column("Δpoll", justify="right")
+        swap = sample.get("swap") or {}
+        used = derived.get("swap:used") or {}
+        ins = derived.get("swap:swapins") or {}
+        outs = derived.get("swap:swapouts") or {}
+        streak = derived.get("swap_streak", 0)
+        style = "red" if "swap:streak" in active else None
+        table.add_row(
+            "Swap used/total", f"{format_bytes(used.get('cur'))} / {format_bytes(swap.get('total'))}",
+            _fmt_delta(used.get("d_poll")), style=style,
+        )
+        table.add_row("Swap-ins (cum)", format_bytes(ins.get("cur")), _fmt_delta(ins.get("d_poll")), style=style)
+        table.add_row("Swap-outs (cum)", format_bytes(outs.get("cur")), _fmt_delta(outs.get("d_poll")), style=style)
+        table.add_row("Swap streak", str(streak), "", style=style)
+        return table
+
+    def _flags_renderable(self, sample: dict, active: set[str]) -> Group:
+        parts: list[Any] = []
+        if active:
+            t = Table(box=box.SIMPLE_HEAVY, expand=True, title="Active flags")
+            t.add_column("Flag")
+            t.add_column("Since", justify="right")
+            t.add_column("Message")
+            now = time.monotonic()
+            for flag_id in sorted(active):
+                info = self._flag_info.get(flag_id, {})
+                raised_at = info.get("raised_at")
+                age = now - raised_at if raised_at is not None else None
+                t.add_row(flag_id, _fmt_duration(age), info.get("message") or "", style="red")
+            parts.append(t)
+        else:
+            parts.append(Text("No active flags."))
+
+        now = time.monotonic()
+        recent = [(t, e) for t, e in self._event_log if now - t <= 600.0]
+        if recent:
+            t2 = Table(box=box.SIMPLE_HEAVY, expand=True, title="Recent flag events (10 min)")
+            t2.add_column("Ago", justify="right")
+            t2.add_column("Flag")
+            t2.add_column("Message")
+            for ts, event in sorted(recent, key=lambda item: -item[0]):
+                t2.add_row(_fmt_duration(now - ts), str(event.get("id")), event.get("message") or "")
+            parts.append(t2)
+
+        if self._historic_diag:
+            t3 = Table(box=box.SIMPLE_HEAVY, expand=True, title="Historic .diag reports (before session)")
+            t3.add_column("File")
+            t3.add_column("Event")
+            t3.add_column("Action")
+            for report in self._historic_diag:
+                t3.add_row(Path(report.get("file", "")).name, str(report.get("event")), str(report.get("action")))
+            parts.append(t3)
+
+        trace = sample.get("trace_io")
+        if trace:
+            t4 = Table(box=box.SIMPLE_HEAVY, expand=True, title="Top written files (60s, --trace-io)")
+            t4.add_column("Path")
+            t4.add_column("Bytes", justify="right")
+            for item in trace.get("top", []):
+                t4.add_row(item.get("path", ""), format_bytes(item.get("bytes")))
+            if not trace.get("active"):
+                t4.add_row("(fs_usage not active)", "", style="dim")
+            parts.append(t4)
+
+        return Group(*parts)
+
+    def _cli_table(self, sample: dict) -> Table:
+        cli = sample.get("cli") or {}
+        agg = cli.get("aggregate") or {}
+        table = Table(box=box.SIMPLE_HEAVY, expand=True)
+        table.add_column("Metric")
+        table.add_column("Value", justify="right")
+        table.add_row("Processes", str(agg.get("count", 0)))
+        table.add_row("CPU", _fmt_cpu(agg.get("cpu_pct")))
+        table.add_row("Footprint", format_bytes(agg.get("footprint")))
+        table.add_row("Write/s", _fmt_rate(agg.get("write_rate")))
+        return table
+
+
 # ── §9 Main loop, entry point ──
 
 def _collect_versions() -> dict:
@@ -2020,8 +2518,7 @@ def run(args: argparse.Namespace) -> int:
 
     is_tty = sys.stdout.isatty()
     use_headless = args.no_tui or not is_tty
-    # TUI (Plan 07) not yet implemented; fall back to headless until then.
-    renderer = HeadlessRenderer(args.log, args.interval)
+    renderer = HeadlessRenderer(args.log, args.interval) if use_headless else TuiRenderer(args, args.log)
 
     state = _RunState()
     _install_signal_handlers(state)
@@ -2061,8 +2558,16 @@ def run(args: argparse.Namespace) -> int:
             seq += 1
             deadline = start + seq * args.interval
             remaining = deadline - time.monotonic()
-            if remaining > 0:
-                renderer.poll_keys(remaining)
+            keys = renderer.poll_keys(remaining) if remaining > 0 else []
+            if "q" in keys:
+                state.stop_requested = True
+                state.stop_reason = "quit"
+            if "b" in keys:
+                analyzer.reset()
+                state.marker_pending = "baseline reset"
+            if "m" in keys and isinstance(renderer, TuiRenderer):
+                label = renderer.take_pending_marker()
+                state.marker_pending = label if label is not None else ""
             if state.marker_pending is not None:
                 log.write({"type": "marker", "label": state.marker_pending})
                 state.marker_pending = None
