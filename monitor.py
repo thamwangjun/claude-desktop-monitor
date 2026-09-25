@@ -1500,12 +1500,387 @@ class SignalsCollector:
 
 # ── §6 Analysis and alerts ── (Plan 06)
 
+_MEM_WINDOW_S = 300.0
+_WRITE_WINDOW_S = 60.0
+_BUNDLE_RATE_WINDOW_S = 600.0
+_MEM_BASELINE_FLOOR = 32 * 2**20
+_CLEAR_HYSTERESIS = 0.9
+_PARTIAL_STALE_S = 300.0
+_BUDGET_2G = 2 * 2**30
+_BUDGET_8G = 8 * 2**30
+_WRITE_BUCKET_WINDOW_MIN = 1440
+_BUNDLE_ROW_NAMES = ("rootfs.img", "sessiondata.img", "other", "total")
+
+
+class TimeWindow:
+    """A rolling window of (t, value) samples, evicted by elapsed time."""
+
+    def __init__(self, seconds: float, interval: float):
+        self.seconds = seconds
+        self.interval = interval
+        self._dq: deque[tuple[float, float]] = deque()
+
+    def add(self, t: float, value: float | None) -> None:
+        if value is not None:
+            self._dq.append((t, value))
+        while self._dq and t - self._dq[0][0] > self.seconds:
+            self._dq.popleft()
+
+    def mean(self) -> float | None:
+        if not self._dq:
+            return None
+        return sum(v for _, v in self._dq) / len(self._dq)
+
+    def oldest(self) -> float | None:
+        return self._dq[0][1] if self._dq else None
+
+    @property
+    def full(self) -> bool:
+        if not self._dq:
+            return False
+        return (self._dq[-1][0] - self._dq[0][0]) >= (self.seconds - self.interval)
+
+
+class _Series:
+    """Per-metric bookkeeping: current/delta/peak, plus an optional rolling window."""
+
+    def __init__(self, window_s: float | None, interval: float):
+        self.window = TimeWindow(window_s, interval) if window_s else None
+        self.first_value: float | None = None
+        self.prev_value: float | None = None
+        self.peak: float | None = None
+
+    def update(self, elapsed: float, value: float | None) -> dict:
+        d_poll = value - self.prev_value if value is not None and self.prev_value is not None else None
+        if value is not None:
+            if self.first_value is None:
+                self.first_value = value
+            if self.peak is None or value > self.peak:
+                self.peak = value
+        d_start = value - self.first_value if value is not None and self.first_value is not None else None
+        self.prev_value = value
+        if self.window is not None:
+            self.window.add(elapsed, value)
+        return {"cur": value, "d_poll": d_poll, "d_start": d_start, "peak": self.peak}
+
+    def reset_peak(self) -> None:
+        self.peak = None
+
+
+def _combined_roles(sample: dict) -> dict[str, dict]:
+    combined = {"total": sample.get("total") or {}}
+    combined.update(sample.get("roles") or {})
+    return combined
+
+
 class Analyzer:
-    def analyze(self, sample: dict) -> tuple[dict, list[dict]]:
-        return {}, []
+    """Turns the raw sample stream into deltas/peaks/windows/baselines and alert flags."""
+
+    def __init__(self, args: argparse.Namespace | None = None):
+        args = args or argparse.Namespace(
+            interval=3.0, cpu_threshold=30.0, cpu_window=60.0, write_threshold=parse_size("1MB"),
+            budget_warn=80.0, mem_growth=50.0, bundle_growth=parse_size("1GB"), bundle_rate=parse_size("100MB"),
+        )
+        self.interval = args.interval
+        self.cpu_threshold = args.cpu_threshold
+        self.cpu_window_s = args.cpu_window
+        self.write_threshold = args.write_threshold
+        self.budget_warn = args.budget_warn
+        self.mem_growth = args.mem_growth
+        self.bundle_growth = args.bundle_growth
+        self.bundle_rate = args.bundle_rate
+
+        self._series: dict[str, _Series] = {}
+        self._baselines: dict[str, float] = {}
+        self._raised: set[str] = set()
+        self._active_partials: set[str] = set()
+
+        self._write_buckets: dict[int, float] = {}
+        self._bundle_rate_window = TimeWindow(_BUNDLE_RATE_WINDOW_S, self.interval)
+        self._bundle_growth_start: float | None = None
+        self._bundle_zst_prev: bool | None = None
+        self._swap_streak = 0
+        self._prev_swapout: float | None = None
+        self._poll_index = 0
+
+    @property
+    def active_flags(self) -> list[str]:
+        return sorted(self._raised)
 
     def reset(self) -> None:
-        pass
+        self._baselines.clear()
+        for series in self._series.values():
+            series.reset_peak()
+
+    def analyze(self, sample: dict) -> tuple[dict, list[dict]]:
+        elapsed = sample.get("elapsed")
+        if elapsed is None:
+            elapsed = self._poll_index * self.interval
+        derived: dict[str, Any] = {}
+        events: list[dict] = []
+
+        for suffix, metrics in _combined_roles(sample).items():
+            self._update_role(derived, events, elapsed, suffix, metrics)
+
+        for name, info in (sample.get("paths") or {}).items():
+            alloc = info.get("allocated") if info.get("present") else None
+            app = info.get("apparent") if info.get("present") else None
+            derived[f"path:{name}:alloc"] = self._series_for(f"path:{name}:alloc", None).update(elapsed, alloc)
+            derived[f"path:{name}:app"] = self._series_for(f"path:{name}:app", None).update(elapsed, app)
+
+        bundle = sample.get("bundle") or {}
+        rows = bundle.get("rows") or {} if bundle.get("present") else {}
+        for row in _BUNDLE_ROW_NAMES:
+            row_info = rows.get(row) or {}
+            alloc = row_info.get("allocated") if bundle.get("present") else None
+            app = row_info.get("apparent") if bundle.get("present") else None
+            derived[f"bundle:{row}:alloc"] = self._series_for(f"bundle:{row}:alloc", None).update(elapsed, alloc)
+            derived[f"bundle:{row}:app"] = self._series_for(f"bundle:{row}:app", None).update(elapsed, app)
+
+        swap = sample.get("swap") or {}
+        derived["swap:used"] = self._series_for("swap:used", None).update(elapsed, swap.get("used"))
+        derived["swap:swapins"] = self._series_for("swap:swapins", None).update(elapsed, swap.get("swapins_bytes"))
+        swapouts = swap.get("swapouts_bytes")
+        derived["swap:swapouts"] = self._series_for("swap:swapouts", None).update(elapsed, swapouts)
+
+        bundle_total_alloc = derived["bundle:total:alloc"]["cur"]
+        self._bundle_flags(events, elapsed, bundle, bundle_total_alloc)
+        self._swap_streak_flag(events, swapouts)
+        self._attribution_flag(events, sample.get("processes") or [])
+        self._diag_events(events, sample.get("diag") or {})
+
+        total = sample.get("total") or {}
+        derived["write_budget"] = self._write_budget(elapsed, total.get("write_delta"))
+        self._budget_flags(events, derived["write_budget"])
+
+        self._poll_index += 1
+        return derived, events
+
+    # -- series plumbing --
+
+    def _series_for(self, key: str, window_s: float | None) -> _Series:
+        series = self._series.get(key)
+        if series is None:
+            series = _Series(window_s, self.interval)
+            self._series[key] = series
+        return series
+
+    def _update_role(self, derived: dict, events: list[dict], elapsed: float, suffix: str, metrics: dict) -> None:
+        cpu_id, mem_id, rss_id, wr_id, rd_id = (f"{p}:{suffix}" for p in ("cpu", "mem", "rss", "wr", "rd"))
+
+        cpu_val = metrics.get("cpu_pct")
+        cpu_series = self._series_for(cpu_id, self.cpu_window_s)
+        cpu_out = cpu_series.update(elapsed, cpu_val)
+        self._attach_baseline(cpu_out, cpu_id, cpu_series.window, kind="cpu")
+        derived[cpu_id] = cpu_out
+
+        mem_val = metrics.get("footprint")
+        if mem_val is None:
+            mem_val = metrics.get("rss")
+        mem_series = self._series_for(mem_id, _MEM_WINDOW_S)
+        mem_out = mem_series.update(elapsed, mem_val)
+        self._attach_baseline(mem_out, mem_id, mem_series.window, kind="mem")
+        derived[mem_id] = mem_out
+
+        derived[rss_id] = self._series_for(rss_id, None).update(elapsed, metrics.get("rss"))
+
+        wr_val = metrics.get("write_rate")
+        wr_series = self._series_for(wr_id, _WRITE_WINDOW_S)
+        wr_out = wr_series.update(elapsed, wr_val)
+        wr_out["avg"] = wr_series.window.mean()
+        derived[wr_id] = wr_out
+
+        derived[rd_id] = self._series_for(rd_id, None).update(elapsed, metrics.get("read_rate"))
+
+        self._cpu_flag(events, suffix, cpu_id, cpu_out)
+        self._mem_flag(events, suffix, mem_id, mem_out)
+        self._write_flag(events, suffix, wr_id, wr_out)
+
+    def _attach_baseline(self, out: dict, series_id: str, window: TimeWindow, kind: str) -> None:
+        avg = window.mean()
+        out["avg"] = avg
+        if window.full and avg is not None:
+            baseline = self._baselines.get(series_id)
+            self._baselines[series_id] = avg if baseline is None else min(baseline, avg)
+        baseline = self._baselines.get(series_id)
+        out["baseline"] = baseline if baseline is not None else "warming"
+        if avg is None or baseline is None:
+            out["vs_baseline"] = None
+        elif kind == "cpu":
+            out["vs_baseline"] = avg - baseline
+        else:
+            out["vs_baseline"] = (avg / baseline - 1) if baseline else None
+
+    # -- flag helpers --
+
+    def _raise(self, events: list[dict], flag_id: str, metric: str, value, threshold, message: str) -> None:
+        if flag_id not in self._raised:
+            self._raised.add(flag_id)
+            events.append({
+                "id": flag_id, "state": "raised", "metric": metric,
+                "value": value, "threshold": threshold, "message": message,
+            })
+
+    def _clear(self, events: list[dict], flag_id: str, metric: str, value, threshold, message: str) -> None:
+        if flag_id in self._raised:
+            self._raised.discard(flag_id)
+            events.append({
+                "id": flag_id, "state": "cleared", "metric": metric,
+                "value": value, "threshold": threshold, "message": message,
+            })
+
+    def _event(self, events: list[dict], flag_id: str, metric: str, value, threshold, message: str) -> None:
+        events.append({
+            "id": flag_id, "state": "event", "metric": metric,
+            "value": value, "threshold": threshold, "message": message,
+        })
+
+    def _cpu_flag(self, events: list[dict], suffix: str, flag_id: str, out: dict) -> None:
+        avg = out["avg"]
+        if not self._series[flag_id].window.full or avg is None:
+            return
+        if avg > self.cpu_threshold:
+            self._raise(events, flag_id, "cpu_pct", avg, self.cpu_threshold,
+                        f"{suffix} CPU {self.cpu_window_s:.0f}s avg {avg:.1f}% > {self.cpu_threshold:.0f}%")
+        elif avg < _CLEAR_HYSTERESIS * self.cpu_threshold:
+            self._clear(events, flag_id, "cpu_pct", avg, self.cpu_threshold,
+                        f"{suffix} CPU {self.cpu_window_s:.0f}s avg {avg:.1f}% recovered")
+
+    def _mem_flag(self, events: list[dict], suffix: str, flag_id: str, out: dict) -> None:
+        avg = out["avg"]
+        baseline = self._baselines.get(flag_id)
+        if avg is None or baseline is None or baseline < _MEM_BASELINE_FLOOR:
+            return
+        ratio = avg / baseline - 1
+        threshold_frac = self.mem_growth / 100
+        if ratio > threshold_frac:
+            self._raise(events, flag_id, "footprint", avg, self.mem_growth,
+                        f"{suffix} memory 5m avg {format_bytes(avg)} > baseline "
+                        f"{format_bytes(baseline)} + {self.mem_growth:.0f}%")
+        elif ratio < _CLEAR_HYSTERESIS * threshold_frac:
+            self._clear(events, flag_id, "footprint", avg, self.mem_growth,
+                        f"{suffix} memory 5m avg {format_bytes(avg)} recovered toward baseline")
+
+    def _write_flag(self, events: list[dict], suffix: str, flag_id: str, out: dict) -> None:
+        avg = out["avg"]
+        if avg is None:
+            return
+        if avg > self.write_threshold:
+            self._raise(events, flag_id, "write_rate", avg, self.write_threshold,
+                        f"{suffix} write rate 60s avg {format_bytes(avg)}/s > {format_bytes(self.write_threshold)}/s")
+        elif avg < _CLEAR_HYSTERESIS * self.write_threshold:
+            self._clear(events, flag_id, "write_rate", avg, self.write_threshold,
+                        f"{suffix} write rate 60s avg {format_bytes(avg)}/s recovered")
+
+    def _write_budget(self, elapsed: float, write_delta: float | None) -> dict:
+        idx = int(elapsed // 60)
+        if write_delta:
+            self._write_buckets[idx] = self._write_buckets.get(idx, 0.0) + write_delta
+        cutoff = idx - _WRITE_BUCKET_WINDOW_MIN
+        for k in [k for k in self._write_buckets if k < cutoff]:
+            del self._write_buckets[k]
+        total_bytes = sum(self._write_buckets.values())
+        window_s = min(elapsed, 86400.0)
+        return {
+            "window_s": round(window_s, 1),
+            "bytes": total_bytes,
+            "pct_2g": total_bytes / _BUDGET_2G * 100,
+            "pct_8g": total_bytes / _BUDGET_8G * 100,
+        }
+
+    def _budget_flags(self, events: list[dict], write_budget: dict) -> None:
+        for tier, pct_key, budget in (("2g", "pct_2g", _BUDGET_2G), ("8g", "pct_8g", _BUDGET_8G)):
+            flag_id = f"budget:{tier}"
+            pct = write_budget[pct_key]
+            if pct >= self.budget_warn:
+                self._raise(events, flag_id, pct_key, pct, self.budget_warn,
+                            f"Total Claude writes {pct:.1f}% of {format_bytes(budget)}/24h budget")
+            elif pct < _CLEAR_HYSTERESIS * self.budget_warn:
+                self._clear(events, flag_id, pct_key, pct, self.budget_warn,
+                            f"Total Claude writes {pct:.1f}% of {format_bytes(budget)}/24h budget, recovered")
+
+    def _bundle_flags(self, events: list[dict], elapsed: float, bundle: dict, total_alloc: float | None) -> None:
+        if self._poll_index == 0:
+            self._bundle_growth_start = total_alloc if total_alloc is not None else 0.0
+
+        if total_alloc is not None:
+            growth = total_alloc - (self._bundle_growth_start or 0.0)
+            if growth > self.bundle_growth:
+                self._raise(events, "bundle:growth", "allocated", growth, self.bundle_growth,
+                            f"VM bundle grown {format_bytes(growth)} since start > {format_bytes(self.bundle_growth)}")
+            elif growth < _CLEAR_HYSTERESIS * self.bundle_growth:
+                self._clear(events, "bundle:growth", "allocated", growth, self.bundle_growth,
+                            f"VM bundle growth {format_bytes(growth)} since start, recovered")
+
+            self._bundle_rate_window.add(elapsed, total_alloc)
+            oldest = self._bundle_rate_window.oldest()
+            if oldest is not None:
+                rate = total_alloc - oldest
+                if rate > self.bundle_rate:
+                    self._raise(events, "bundle:rate", "allocated", rate, self.bundle_rate,
+                                f"VM bundle grew {format_bytes(rate)} in the last 10m > {format_bytes(self.bundle_rate)}")
+                elif rate < _CLEAR_HYSTERESIS * self.bundle_rate:
+                    self._clear(events, "bundle:rate", "allocated", rate, self.bundle_rate,
+                                f"VM bundle 10m growth {format_bytes(rate)}, recovered")
+
+        if bundle.get("present"):
+            zst_present = bundle.get("zst_present")
+            if self._bundle_zst_prev is not None and zst_present != self._bundle_zst_prev:
+                verb = "appeared" if zst_present else "disappeared"
+                self._event(events, "bundle:zst", "zst_present", zst_present, None,
+                            f"rootfs.img.zst {verb}")
+            self._bundle_zst_prev = zst_present
+
+            stale_now = {
+                p["path"] for p in bundle.get("partials", []) if p.get("age_s", 0) > _PARTIAL_STALE_S
+            }
+            partials_by_path = {p["path"]: p for p in bundle.get("partials", [])}
+            for path in stale_now - self._active_partials:
+                flag_id = f"partial:{path}"
+                age = partials_by_path[path]["age_s"]
+                self._raise(events, flag_id, "age_s", age, _PARTIAL_STALE_S,
+                            f"stale partial download {path} ({age:.0f}s old)")
+            for path in self._active_partials - stale_now:
+                flag_id = f"partial:{path}"
+                self._clear(events, flag_id, "age_s", None, _PARTIAL_STALE_S,
+                            f"partial download {path} no longer stale")
+            self._active_partials = stale_now
+
+    def _swap_streak_flag(self, events: list[dict], swapouts: float | None) -> None:
+        if swapouts is not None and self._prev_swapout is not None and swapouts > self._prev_swapout:
+            self._swap_streak += 1
+        else:
+            self._swap_streak = 0
+        self._prev_swapout = swapouts
+
+        if self._swap_streak >= 3:
+            self._raise(events, "swap:streak", "swapouts_bytes", swapouts, 3,
+                        f"swap-outs increased on {self._swap_streak} consecutive polls")
+        else:
+            self._clear(events, "swap:streak", "swapouts_bytes", swapouts, 3,
+                        "swap-outs stopped increasing")
+
+    def _attribution_flag(self, events: list[dict], processes: list[dict]) -> None:
+        unresolved = [p for p in processes if p.get("attribution") == "name?"]
+        if unresolved:
+            self._raise(events, "attr:vm?", "attribution", len(unresolved), 0,
+                        f"{len(unresolved)} process(es) attributed by name only (coalition/responsible-PID lookup failed)")
+        else:
+            self._clear(events, "attr:vm?", "attribution", 0, 0, "VM attribution resolved")
+
+    def _diag_events(self, events: list[dict], diag: dict) -> None:
+        for report in diag.get("new", []):
+            filename = Path(report.get("file", "")).name
+            writes_mb = report.get("writes_mb")
+            if writes_mb is not None:
+                message = (
+                    f"Claude {report.get('event')} report: {writes_mb:.0f} MB over "
+                    f"{report.get('writes_over_s', 0):.0f} s, limit {report.get('limit_kbps', 0):.2f} KB/s, "
+                    f"action {report.get('action') or 'none'}"
+                )
+            else:
+                message = f"Claude diagnostic report: {report.get('event')}, action {report.get('action') or 'none'}"
+            self._event(events, f"diag:{filename}", "diag_report", report.get("event"), None, message)
 
 
 # ── §7 JSONL log writer ──
@@ -1641,7 +2016,7 @@ def run(args: argparse.Namespace) -> int:
         DiskCollector(support_dir=args.support_dir, full_rescan=args.full_rescan),
         SignalsCollector(),
     ]
-    analyzer = Analyzer()
+    analyzer = Analyzer(args)
 
     is_tty = sys.stdout.isatty()
     use_headless = args.no_tui or not is_tty
@@ -1666,12 +2041,12 @@ def run(args: argparse.Namespace) -> int:
     try:
         while not state.stop_requested:
             now = time.monotonic()
-            sample: dict[str, Any] = {"type": "sample", "seq": seq}
+            sample: dict[str, Any] = {"type": "sample", "seq": seq, "elapsed": round(now - start, 3)}
             for collector in collectors:
                 sample.update(collector.collect(now))
             derived, flag_events = analyzer.analyze(sample)
             sample["derived"] = derived
-            sample["active_flags"] = [event["id"] for event in flag_events if event.get("state") == "raised"]
+            sample["active_flags"] = analyzer.active_flags
 
             diag = sample.get("diag") or {}
             for report in [*diag.get("historic", []), *diag.get("new", [])]:
