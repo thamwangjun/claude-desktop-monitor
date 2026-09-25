@@ -16,11 +16,15 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import psutil
 
 # ── §1 Constants, unit helpers, CLI ──
 
@@ -289,12 +293,483 @@ def responsible_pid(pid: int) -> int | None:
 
 # ── §3 Process collector ── (Plan 03)
 
-class ProcessCollector:
-    def collect(self, now: float) -> dict:
-        return {}
+_CLAUDE_APP_CANDIDATES = ("/Applications/Claude.app", os.path.expanduser("~/Applications/Claude.app"))
+_VM_PROCESS_NAME = "com.apple.Virtualization.VirtualMachine"
+
+_UTILITY_SUBTYPE_RE = re.compile(r"--utility-sub-type=(\S+)")
+_WRITE_CALL_RE = re.compile(r"\b(write|pwrite|writev|pwritev|WrData\w*)\b")
+_FS_USAGE_BYTES_RE = re.compile(r"B=0x([0-9a-fA-F]+)")
+
+_PROCESS_ATTRS = ["pid", "exe", "cmdline", "create_time", "name"]
+
+
+def _info(proc: psutil.Process, field: str, default=None):
+    """Read a cached psutil.Process.info field, tolerating a dead/denied process."""
+    try:
+        return proc.info.get(field, default)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return default
+
+
+def _iter_processes() -> list[psutil.Process]:
+    return list(psutil.process_iter(_PROCESS_ATTRS))
+
+
+def _safe_exe(proc: psutil.Process) -> str | None:
+    """Best-effort executable path: cached info, then live exe/cmdline/name."""
+    exe = _info(proc, "exe")
+    if exe:
+        return exe
+    try:
+        return proc.exe()
+    except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+        pass
+    cmdline = _safe_cmdline(proc)
+    if cmdline:
+        return cmdline[0]
+    try:
+        return proc.name()
+    except (psutil.NoSuchProcess, OSError):
+        return None
+
+
+def _safe_cmdline(proc: psutil.Process) -> list[str]:
+    cmdline = _info(proc, "cmdline")
+    if cmdline:
+        return cmdline
+    try:
+        return proc.cmdline()
+    except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+        return []
+
+
+def _is_vm_process(proc: psutil.Process) -> bool:
+    if _info(proc, "name") == _VM_PROCESS_NAME:
+        return True
+    exe = _safe_exe(proc)
+    return bool(exe) and os.path.basename(exe) == _VM_PROCESS_NAME
+
+
+def _find_main(all_procs: list[psutil.Process]) -> tuple[psutil.Process | None, str | None]:
+    """The oldest process whose exe is a known Claude.app main binary, plus its app root."""
+    candidates = {os.path.join(root, "Contents/MacOS/Claude"): root for root in _CLAUDE_APP_CANDIDATES}
+    matches = [p for p in all_procs if _info(p, "exe") in candidates]
+    if not matches:
+        return None, None
+    matches.sort(key=lambda p: _info(p, "create_time") or 0)
+    main_proc = matches[0]
+    return main_proc, candidates[_info(main_proc, "exe")]
+
+
+def classify_role(exe: str | None, cmdline: list[str], main_exe: str | None, app_prefix: str | None) -> str:
+    """Role classification per REQUIREMENTS.md P-5, evaluated in a fixed order."""
+    if exe and exe == main_exe:
+        return "main"
+    if exe and os.path.basename(exe) == _VM_PROCESS_NAME:
+        return "vm"
+    if exe and os.path.basename(exe) == "chrome_crashpad_handler":
+        return "crashpad"
+    in_bundle = bool(app_prefix and exe and exe.startswith(app_prefix))
+    cmdline_str = " ".join(cmdline)
+    if in_bundle and "--type=renderer" in cmdline_str:
+        return "renderer"
+    if in_bundle and "--type=gpu-process" in cmdline_str:
+        return "gpu"
+    if in_bundle and "--type=utility" in cmdline_str:
+        match = _UTILITY_SUBTYPE_RE.search(cmdline_str)
+        if match:
+            return f"utility:{match.group(1).split('.')[0]}"
+        return "utility:unknown"
+    if exe and (exe.startswith("/System/") or exe.startswith("/usr/")):
+        return "xpc"
+    return "other"
+
+
+_CLI_BASENAMES = {"claude", "claude.exe"}  # mise/npm global installs shim as claude.exe on this machine
+
+
+def is_cli_process(exe: str | None) -> bool:
+    """True for the Claude Code CLI, excluding Zed's embedded claude-agent-sdk (P-2)."""
+    if not exe or "claude-agent-sdk" in exe:
+        return False
+    return os.path.basename(exe) in _CLI_BASENAMES
+
+
+def compute_io_deltas(
+    prev_read: int | None,
+    prev_written: int | None,
+    cur_read: int,
+    cur_written: int,
+    create_time: float,
+    session_start_epoch: float,
+    first_seen: bool,
+) -> tuple[int, int]:
+    """Delta rules: pre-existing processes contribute 0 on first observation."""
+    if first_seen:
+        if create_time >= session_start_epoch:
+            return cur_read, cur_written
+        return 0, 0
+    read_delta = cur_read - prev_read if cur_read >= prev_read else 0
+    write_delta = cur_written - prev_written if cur_written >= prev_written else 0
+    return read_delta, write_delta
+
+
+def sum_or_none(values) -> float | None:
+    vals = [v for v in values if v is not None]
+    return sum(vals) if vals else None
+
+
+def aggregate_processes(processes: list[dict], dt: float | None) -> dict:
+    agg = {
+        "count": len(processes),
+        "cpu_pct": sum_or_none(p["cpu_pct"] for p in processes),
+        "footprint": sum_or_none(p["footprint"] for p in processes),
+        "rss": sum_or_none(p["rss"] for p in processes),
+        "read_delta": sum_or_none(p["read_delta"] for p in processes),
+        "write_delta": sum_or_none(p["write_delta"] for p in processes),
+    }
+    agg["read_rate"] = agg["read_delta"] / dt if agg["read_delta"] is not None and dt else None
+    agg["write_rate"] = agg["write_delta"] / dt if agg["write_delta"] is not None and dt else None
+    return agg
+
+
+def parse_fs_usage_line(line: str) -> tuple[str, int] | None:
+    """Parse one `fs_usage -w -f filesys` line for a write-family call.
+
+    fs_usage's output format is undocumented and varies by macOS version, so
+    this is deliberately best-effort: returns None for anything that isn't a
+    write call, or that doesn't carry a byte count and a path we can find.
+    """
+    if not _WRITE_CALL_RE.search(line):
+        return None
+    bytes_match = _FS_USAGE_BYTES_RE.search(line)
+    if not bytes_match:
+        return None
+    # fs_usage pads columns with runs of spaces; splitting on single whitespace
+    # would break paths with embedded spaces (e.g. "Application Support").
+    columns = re.split(r"\s{2,}", line.strip())
+    path = next((col for col in columns if col.startswith("/")), None)
+    if path is None:
+        return None
+    try:
+        num_bytes = int(bytes_match.group(1), 16)
+    except ValueError:
+        return None
+    return path, num_bytes
+
+
+@dataclass
+class _ProcState:
+    process: psutil.Process
+    last_read: int | None = None
+    last_written: int | None = None
+    io_seen: bool = False
+
+
+class FsUsageTracer:
+    """Runs `sudo fs_usage -w -f filesys` for the tracked PIDs (I-5).
+
+    Only constructed/used when --trace-io is set; never invoked otherwise.
+    """
+
+    def __init__(self, window: float = 60.0, top_n: int = 10, restart_debounce: float = 30.0):
+        self._window = window
+        self._top_n = top_n
+        self._restart_debounce = restart_debounce
+        self._lock = threading.Lock()
+        self._events: deque[tuple[float, str, int]] = deque()
+        self._unparsed = 0
+        self._proc: subprocess.Popen | None = None
+        self._thread: threading.Thread | None = None
+        self._current_pids: frozenset[int] = frozenset()
+        self._last_restart = float("-inf")
+
+    def update_pids(self, pids: set[int], now: float) -> None:
+        pids = frozenset(pids)
+        if pids == self._current_pids:
+            return
+        if now - self._last_restart < self._restart_debounce:
+            return
+        self._current_pids = pids
+        self._restart(now)
+
+    def _restart(self, now: float) -> None:
+        self._stop_process()
+        self._last_restart = now
+        if not self._current_pids:
+            return
+        cmd = ["sudo", "-n", "fs_usage", "-w", "-f", "filesys"] + [str(pid) for pid in sorted(self._current_pids)]
+        try:
+            self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        except OSError:
+            self._proc = None
+            return
+        self._thread = threading.Thread(target=self._read_loop, args=(self._proc,), daemon=True)
+        self._thread.start()
+
+    def _read_loop(self, proc: subprocess.Popen) -> None:
+        try:
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    self._ingest_line(line)
+        except (OSError, ValueError):
+            pass
+
+    def _ingest_line(self, line: str) -> None:
+        result = parse_fs_usage_line(line)
+        now = time.monotonic()
+        with self._lock:
+            if result is not None:
+                path, num_bytes = result
+                self._events.append((now, path, num_bytes))
+            elif _WRITE_CALL_RE.search(line):
+                self._unparsed += 1
+
+    def snapshot(self, now: float) -> dict:
+        with self._lock:
+            while self._events and now - self._events[0][0] > self._window:
+                self._events.popleft()
+            totals: dict[str, int] = {}
+            for _, path, num_bytes in self._events:
+                totals[path] = totals.get(path, 0) + num_bytes
+            unparsed = self._unparsed
+        top = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[: self._top_n]
+        return {
+            "active": self._proc is not None and self._proc.poll() is None,
+            "top": [{"path": path, "bytes": num_bytes} for path, num_bytes in top],
+            "unparsed": unparsed,
+        }
+
+    def _stop_process(self) -> None:
+        if self._proc is None:
+            return
+        try:
+            self._proc.terminate()
+            self._proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+        except OSError:
+            pass
+        self._proc = None
+        self._thread = None
 
     def close(self) -> None:
-        pass
+        self._stop_process()
+
+
+class ProcessCollector:
+    def __init__(self, include_cli: bool = False, trace_io: bool = False):
+        self._include_cli = include_cli
+        self._trace_io = trace_io
+        self._proc_cache: dict[tuple[int, float], _ProcState] = {}
+        self._coalition_cache: dict[tuple[int, float], int | None] = {}
+        self._session_start_epoch = time.time()
+        self._last_poll: float | None = None
+        self._tracer = FsUsageTracer() if trace_io else None
+
+    def collect(self, now: float) -> dict:
+        dt = None if self._last_poll is None else (now - self._last_poll)
+        all_procs = _iter_processes()
+        seen_keys = {
+            (pid, ct)
+            for pid, ct in ((_info(p, "pid"), _info(p, "create_time")) for p in all_procs)
+            if pid is not None and ct is not None
+        }
+        self._prune_caches(seen_keys)
+
+        main_proc, app_path = _find_main(all_procs)
+        if main_proc is None:
+            sample = {
+                "claude": {"running": False, "main_pid": None, "coalition_id": None, "app_path": app_path},
+                "processes": [],
+                "roles": {},
+                "total": aggregate_processes([], dt),
+            }
+            tracked_pids: set[int] = set()
+        else:
+            main_pid = _info(main_proc, "pid")
+            main_key = (main_pid, _info(main_proc, "create_time"))
+            cid = self._coalition_id_cached(main_key, main_pid)
+            if cid is not None:
+                tracked, attribution = self._tracked_by_coalition(all_procs, cid)
+            else:
+                tracked, attribution = self._tracked_by_fallback(all_procs, app_path, main_proc)
+            sample = self._build_sample(main_proc, app_path, cid, tracked, attribution, dt)
+            tracked_pids = {p["pid"] for p in sample["processes"]}
+
+        if self._include_cli:
+            sample["cli"] = self._collect_cli(all_procs, tracked_pids, dt)
+
+        if self._trace_io and self._tracer is not None:
+            self._tracer.update_pids(tracked_pids, now)
+            sample["trace_io"] = self._tracer.snapshot(now)
+
+        self._last_poll = now
+        return sample
+
+    def _prune_caches(self, seen_keys: set[tuple[int, float]]) -> None:
+        for cache in (self._proc_cache, self._coalition_cache):
+            for key in [k for k in cache if k not in seen_keys]:
+                del cache[key]
+
+    def _coalition_id_cached(self, key: tuple[int, float], pid: int) -> int | None:
+        if key in self._coalition_cache:
+            return self._coalition_cache[key]
+        cid = coalition_id(pid)
+        self._coalition_cache[key] = cid
+        return cid
+
+    def _tracked_by_coalition(
+        self, all_procs: list[psutil.Process], cid: int
+    ) -> tuple[list[psutil.Process], dict[int, str]]:
+        tracked = []
+        attribution: dict[int, str] = {}
+        for p in all_procs:
+            pid, create_time = _info(p, "pid"), _info(p, "create_time")
+            if pid is None or create_time is None:
+                continue
+            if self._coalition_id_cached((pid, create_time), pid) == cid:
+                tracked.append(p)
+                attribution[pid] = "coalition"
+        return tracked, attribution
+
+    def _tracked_by_fallback(
+        self, all_procs: list[psutil.Process], app_path: str | None, main_proc: psutil.Process
+    ) -> tuple[list[psutil.Process], dict[int, str]]:
+        tracked = [main_proc]
+        main_pid = _info(main_proc, "pid")
+        attribution: dict[int, str] = {main_pid: "path"}
+        app_prefix = f"{app_path}/" if app_path else None
+        for p in all_procs:
+            pid = _info(p, "pid")
+            if pid is None or pid == main_pid:
+                continue
+            exe = _safe_exe(p)
+            if app_prefix and exe and exe.startswith(app_prefix):
+                tracked.append(p)
+                attribution[pid] = "path"
+        for p in all_procs:
+            pid = _info(p, "pid")
+            if pid is None or pid in attribution or not _is_vm_process(p):
+                continue
+            tracked.append(p)
+            attribution[pid] = "responsible" if responsible_pid(pid) == main_pid else "name?"
+        return tracked, attribution
+
+    def _build_sample(
+        self,
+        main_proc: psutil.Process,
+        app_path: str | None,
+        cid: int | None,
+        tracked: list[psutil.Process],
+        attribution: dict[int, str],
+        dt: float | None,
+    ) -> dict:
+        main_pid = _info(main_proc, "pid")
+        main_exe = _safe_exe(main_proc)
+        app_prefix = f"{app_path}/" if app_path else None
+        processes = []
+        for p in tracked:
+            pid, create_time = _info(p, "pid"), _info(p, "create_time")
+            if pid is None or create_time is None:
+                continue
+            exe = _safe_exe(p)
+            role = classify_role(exe, _safe_cmdline(p), main_exe, app_prefix)
+            metrics = self._process_metrics(
+                (pid, create_time), pid, create_time, exe, role, attribution.get(pid, "coalition"),
+            )
+            if metrics is not None:
+                processes.append(metrics)
+        by_role: dict[str, list[dict]] = {}
+        for proc in processes:
+            by_role.setdefault(proc["role"], []).append(proc)
+        roles = {role: aggregate_processes(procs, dt) for role, procs in by_role.items()}
+        return {
+            "claude": {"running": True, "main_pid": main_pid, "coalition_id": cid, "app_path": app_path},
+            "processes": processes,
+            "roles": roles,
+            "total": aggregate_processes(processes, dt),
+        }
+
+    def _collect_cli(self, all_procs: list[psutil.Process], tracked_pids: set[int], dt: float | None) -> dict:
+        processes = []
+        for p in all_procs:
+            pid, create_time = _info(p, "pid"), _info(p, "create_time")
+            if pid is None or create_time is None or pid in tracked_pids:
+                continue
+            exe = _safe_exe(p)
+            if not is_cli_process(exe):
+                continue
+            metrics = self._process_metrics((pid, create_time), pid, create_time, exe, "cli", "name")
+            if metrics is not None:
+                processes.append(metrics)
+        return {"processes": processes, "aggregate": aggregate_processes(processes, dt)}
+
+    def _process_metrics(
+        self,
+        key: tuple[int, float],
+        pid: int,
+        create_time: float,
+        exe: str | None,
+        role: str,
+        attribution: str,
+    ) -> dict | None:
+        state = self._proc_cache.get(key)
+        if state is None:
+            try:
+                handle = psutil.Process(pid)
+            except psutil.Error:
+                return None
+            state = _ProcState(process=handle)
+            self._proc_cache[key] = state
+            try:
+                state.process.cpu_percent(None)  # prime; first reading is meaningless
+            except psutil.Error:
+                return None
+            cpu_pct = None
+        else:
+            try:
+                cpu_pct = state.process.cpu_percent(None)
+            except psutil.Error:
+                return None
+
+        ru = rusage(pid)
+        if ru is not None:
+            footprint, rss = ru.footprint, ru.resident
+        else:
+            footprint = None
+            try:
+                rss = state.process.memory_info().rss
+            except psutil.Error:
+                rss = None
+
+        if ru is None:
+            disk_read = disk_written = read_delta = write_delta = None
+        else:
+            disk_read, disk_written = ru.disk_read, ru.disk_written
+            read_delta, write_delta = compute_io_deltas(
+                state.last_read, state.last_written, disk_read, disk_written,
+                create_time, self._session_start_epoch, first_seen=not state.io_seen,
+            )
+            state.last_read, state.last_written, state.io_seen = disk_read, disk_written, True
+
+        return {
+            "pid": pid,
+            "role": role,
+            "exe": exe,
+            "attribution": attribution,
+            "cpu_pct": cpu_pct,
+            "footprint": footprint,
+            "rss": rss,
+            "disk_read": disk_read,
+            "disk_written": disk_written,
+            "read_delta": read_delta,
+            "write_delta": write_delta,
+        }
+
+    def close(self) -> None:
+        if self._tracer is not None:
+            self._tracer.close()
 
 
 # ── §4 Disk collector ── (Plan 04)
@@ -455,7 +930,11 @@ def _install_signal_handlers(state: _RunState) -> None:
 
 def run(args: argparse.Namespace) -> int:
     log = LogWriter(args.log)
-    collectors = [ProcessCollector(), DiskCollector(), SignalsCollector()]
+    collectors = [
+        ProcessCollector(include_cli=args.include_cli, trace_io=args.trace_io),
+        DiskCollector(),
+        SignalsCollector(),
+    ]
     analyzer = Analyzer()
 
     is_tty = sys.stdout.isatty()
@@ -522,8 +1001,24 @@ def run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _sudo_preflight() -> bool:
+    """Prompt for sudo before any renderer starts (E-6): the only sudo use, and only here."""
+    print(
+        "claude-desktop-monitor: --trace-io needs sudo for fs_usage; you may be prompted for your password.",
+        file=sys.stderr,
+    )
+    try:
+        result = subprocess.run(["sudo", "-v"])
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.trace_io and not _sudo_preflight():
+        print("claude-desktop-monitor: sudo authentication failed; --trace-io requires it.", file=sys.stderr)
+        return 1
     return run(args)
 
 
