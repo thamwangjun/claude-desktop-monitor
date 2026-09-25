@@ -142,6 +142,150 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 # ── §2 Native macOS calls (ctypes) ── (Plan 02)
 
+import ctypes
+
+RUSAGE_INFO_V2 = 2
+PROC_PIDCOALITIONINFO = 20
+
+NATIVE_AVAILABLE: dict[str, bool] = {
+    "proc_pid_rusage": False,
+    "proc_pidinfo": False,
+    "responsibility_get_pid_responsible_for_pid": False,
+}
+
+try:
+    _libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+except OSError:
+    _libc = None
+
+
+class _RUsageInfoV2(ctypes.Structure):
+    _fields_ = [
+        ("ri_uuid", ctypes.c_uint8 * 16),
+        ("ri_user_time", ctypes.c_uint64),
+        ("ri_system_time", ctypes.c_uint64),
+        ("ri_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_interrupt_wkups", ctypes.c_uint64),
+        ("ri_pageins", ctypes.c_uint64),
+        ("ri_wired_size", ctypes.c_uint64),
+        ("ri_resident_size", ctypes.c_uint64),
+        ("ri_phys_footprint", ctypes.c_uint64),
+        ("ri_proc_start_abstime", ctypes.c_uint64),
+        ("ri_proc_exit_abstime", ctypes.c_uint64),
+        ("ri_child_user_time", ctypes.c_uint64),
+        ("ri_child_system_time", ctypes.c_uint64),
+        ("ri_child_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_child_interrupt_wkups", ctypes.c_uint64),
+        ("ri_child_pageins", ctypes.c_uint64),
+        ("ri_child_elapsed_abstime", ctypes.c_uint64),
+        ("ri_diskio_bytesread", ctypes.c_uint64),
+        ("ri_diskio_byteswritten", ctypes.c_uint64),
+    ]
+
+
+class _ProcPidCoalitionInfo(ctypes.Structure):
+    _fields_ = [
+        ("coalition_id", ctypes.c_uint64 * 2),
+        ("reserved1", ctypes.c_uint64),
+        ("reserved2", ctypes.c_uint64),
+        ("reserved3", ctypes.c_uint64),
+    ]
+
+
+_proc_pid_rusage = None
+if _libc is not None:
+    try:
+        _proc_pid_rusage = _libc.proc_pid_rusage
+        _proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(_RUsageInfoV2)]
+        _proc_pid_rusage.restype = ctypes.c_int
+        NATIVE_AVAILABLE["proc_pid_rusage"] = True
+    except AttributeError:
+        _proc_pid_rusage = None
+
+_proc_pidinfo = None
+if _libc is not None:
+    try:
+        _proc_pidinfo = _libc.proc_pidinfo
+        _proc_pidinfo.argtypes = [
+            ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+            ctypes.POINTER(_ProcPidCoalitionInfo), ctypes.c_int,
+        ]
+        _proc_pidinfo.restype = ctypes.c_int
+        NATIVE_AVAILABLE["proc_pidinfo"] = True
+    except AttributeError:
+        _proc_pidinfo = None
+
+_responsibility_get_pid_responsible_for_pid = None
+if _libc is not None:
+    try:
+        _responsibility_get_pid_responsible_for_pid = _libc.responsibility_get_pid_responsible_for_pid
+        _responsibility_get_pid_responsible_for_pid.argtypes = [ctypes.c_int]
+        _responsibility_get_pid_responsible_for_pid.restype = ctypes.c_int
+        NATIVE_AVAILABLE["responsibility_get_pid_responsible_for_pid"] = True
+    except AttributeError:
+        _responsibility_get_pid_responsible_for_pid = None
+
+
+@dataclass(frozen=True)
+class RUsage:
+    footprint: int
+    resident: int
+    disk_read: int
+    disk_written: int
+
+
+def rusage(pid: int) -> RUsage | None:
+    """Physical footprint, resident size and cumulative disk I/O bytes for pid.
+
+    Returns None for a vanished, inaccessible or unreadable process, or if
+    the native call is unavailable. Never raises.
+    """
+    if _proc_pid_rusage is None:
+        return None
+    buf = _RUsageInfoV2()
+    try:
+        result = _proc_pid_rusage(pid, RUSAGE_INFO_V2, ctypes.byref(buf))
+    except (OSError, ctypes.ArgumentError):
+        return None
+    if result != 0:
+        return None
+    return RUsage(
+        footprint=buf.ri_phys_footprint,
+        resident=buf.ri_resident_size,
+        disk_read=buf.ri_diskio_bytesread,
+        disk_written=buf.ri_diskio_byteswritten,
+    )
+
+
+def coalition_id(pid: int) -> int | None:
+    """Resource coalition ID for pid, or None on failure or an empty coalition.
+
+    PROC_PIDCOALITIONINFO is a private xnu flavor; success is signalled by
+    the return value equalling sizeof(struct proc_pidcoalitioninfo) (40).
+    """
+    if _proc_pidinfo is None:
+        return None
+    buf = _ProcPidCoalitionInfo()
+    try:
+        result = _proc_pidinfo(pid, PROC_PIDCOALITIONINFO, 0, ctypes.byref(buf), ctypes.sizeof(buf))
+    except (OSError, ctypes.ArgumentError):
+        return None
+    if result != ctypes.sizeof(buf):
+        return None
+    value = buf.coalition_id[0]
+    return value if value != 0 else None
+
+
+def responsible_pid(pid: int) -> int | None:
+    """PID of the process responsible for launching pid, or None on failure."""
+    if _responsibility_get_pid_responsible_for_pid is None:
+        return None
+    try:
+        result = _responsibility_get_pid_responsible_for_pid(pid)
+    except (OSError, ctypes.ArgumentError):
+        return None
+    return result if result > 0 else None
+
 
 # ── §3 Process collector ── (Plan 03)
 
@@ -247,6 +391,7 @@ def _collect_versions() -> dict:
             versions[name] = "not installed"
     versions["macos"] = platform.mac_ver()[0]
     versions["claude_app"] = _claude_app_version()
+    versions["native"] = dict(NATIVE_AVAILABLE)
     return versions
 
 
