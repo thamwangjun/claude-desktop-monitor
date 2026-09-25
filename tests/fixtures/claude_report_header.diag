@@ -1,0 +1,27 @@
+Process:          Claude [87512]
+Path:             /Applications/Claude.app/Contents/MacOS/Claude
+Identifier:       com.anthropic.claudefordesktop
+Version:          2.9939.2 (2.9939.2)
+Code Type:        ARM-64
+Parent Process:   launchd [1]
+Responsible:      Claude [87512]
+User ID:          501
+Date/Time:        2026-09-25 21:16:53.979 +0800
+End time:         2026-09-25 21:34:32.714 +0800
+OS Version:       macOS 26.7 (25G229)
+Report Version:   14
+
+Command:          Claude
+Path:             /Applications/Claude.app/Contents/MacOS/Claude
+Identifier:       com.anthropic.claudefordesktop
+Version:          2.9939.2 (2.9939.2)
+Resource Coalition: "com.anthropic.claudefordesktop"(11603)
+PID:              87512
+
+Event:            disk writes
+Action taken:     none
+Writes:           2147.48 MB of file backed memory dirtied over 1059 seconds (2028.35 KB per second average), exceeding limit of 24.86 KB per second over 86400 seconds
+Writes limit:     2147.48 MB
+Limit duration:   86400s
+
+Elapsed CPU time (seconds):

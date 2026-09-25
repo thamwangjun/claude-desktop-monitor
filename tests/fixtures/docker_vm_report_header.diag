@@ -1,0 +1,27 @@
+Process:          com.apple.Virtualization.VirtualMachine [12345]
+Path:             /Applications/Docker.app/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+Identifier:       com.apple.Virtualization.VirtualMachine
+Version:          1.0 (1)
+Code Type:        ARM-64
+Parent Process:   launchd [1]
+Responsible:      com.docker.docker [9999]
+User ID:          501
+Date/Time:        2026-09-25 20:58:12.001 +0800
+End time:         2026-09-25 21:00:18.442 +0800
+OS Version:       macOS 26.7 (25G229)
+Report Version:   14
+
+Command:          com.apple.Virtualization.VirtualMachine
+Path:             /Applications/Docker.app/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+Identifier:       com.apple.Virtualization.VirtualMachine
+Version:          1.0 (1)
+Resource Coalition: "com.docker.docker"(11507)
+PID:              12345
+
+Event:            disk writes
+Action taken:     none
+Writes:           2200.00 MB of file backed memory dirtied over 1200 seconds (1833.33 KB per second average), exceeding limit of 24.86 KB per second over 86400 seconds
+Writes limit:     2147.48 MB
+Limit duration:   86400s
+
+Elapsed CPU time (seconds):

@@ -1175,12 +1175,327 @@ class DiskCollector:
 
 # ── §5 System signals (swap, .diag reports) ── (Plan 05)
 
-class SignalsCollector:
+_DIAG_DIR = Path("/Library/Logs/DiagnosticReports")
+_CLAUDE_COALITION_NAME = "com.anthropic.claudefordesktop"
+_DIAG_RETRY_LIMIT = 2
+_DIAG_HISTORIC_WINDOW_S = 86400.0
+
+_DIAG_KV_RE = re.compile(r"^([A-Za-z][A-Za-z /]*?):\s*(.*)$")
+_COALITION_RE = re.compile(r'^"(.*)"\((\d+)\)$')
+_WRITES_RE = re.compile(
+    r"([\d.]+)\s*MB.*?over\s+([\d.]+)\s*seconds\s*\(([\d.]+)\s*KB per second average\).*?"
+    r"exceeding limit of\s+([\d.]+)\s*KB per second over\s+(\d+)\s*seconds"
+)
+_VM_STAT_PAGE_SIZE_RE = re.compile(r"page size of (\d+) bytes")
+
+
+def _vm_stat_pages(output: str, label: str) -> int | None:
+    match = re.search(rf"^{re.escape(label)}:\s*([\d,]+)\.", output, re.MULTILINE)
+    if not match:
+        return None
+    return int(match.group(1).replace(",", ""))
+
+
+def parse_vm_stat(output: str) -> dict:
+    """Parse `vm_stat` output into byte counts (M-2).
+
+    swapins_bytes/swapouts_bytes are true swap (vm_stat's Swapins/Swapouts).
+    pageins_bytes/pageouts_bytes are ordinary file paging (vm_stat's
+    Pageins/Pageouts) -- these are what psutil calls sin/sout on macOS, and
+    they are NOT swap. Any field that can't be found is None.
+    """
+    page_match = _VM_STAT_PAGE_SIZE_RE.search(output)
+    page_size = int(page_match.group(1)) if page_match else None
+
+    def _bytes(label: str) -> int | None:
+        pages = _vm_stat_pages(output, label)
+        if pages is None or page_size is None:
+            return None
+        return pages * page_size
+
+    return {
+        "swapins_bytes": _bytes("Swapins"),
+        "swapouts_bytes": _bytes("Swapouts"),
+        "pageins_bytes": _bytes("Pageins"),
+        "pageouts_bytes": _bytes("Pageouts"),
+    }
+
+
+class SwapSampler:
+    """Swap total/used/free (psutil, correct on macOS) plus true swap-ins/outs
+    and pageins/outs (vm_stat, since psutil's sin/sout are file paging)."""
+
+    def collect(self) -> dict:
+        try:
+            vm = psutil.swap_memory()
+            result: dict[str, Any] = {"total": vm.total, "used": vm.used, "free": vm.free}
+        except Exception:
+            result = {"total": None, "used": None, "free": None}
+        try:
+            proc = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=2)
+            output = proc.stdout if proc.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError):
+            output = ""
+        if output:
+            result.update(parse_vm_stat(output))
+        else:
+            result.update({"swapins_bytes": None, "swapouts_bytes": None,
+                            "pageins_bytes": None, "pageouts_bytes": None})
+        return result
+
+
+def parse_diag_header(text: str) -> dict:
+    """Parse the `Key: value` header lines of a macOS .diag report.
+
+    Reads lines until the first blank line that comes *after* an `Event:`
+    key has been seen (blank lines before that, e.g. between header blocks,
+    don't stop the scan).
+    """
+    fields: dict[str, str] = {}
+    seen_event = False
+    for line in text.splitlines():
+        if seen_event and not line.strip():
+            break
+        match = _DIAG_KV_RE.match(line)
+        if not match:
+            continue
+        key, value = match.group(1).strip(), match.group(2).strip()
+        fields[key] = value
+        if key == "Event":
+            seen_event = True
+    return fields
+
+
+def _split_coalition(raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    match = _COALITION_RE.match(raw)
+    if not match:
+        return {"name": raw, "id": None}
+    return {"name": match.group(1), "id": int(match.group(2))}
+
+
+def parse_writes_line(raw: str | None) -> dict | None:
+    """Extract the numbers out of a diag report's `Writes:` line."""
+    if not raw:
+        return None
+    match = _WRITES_RE.search(raw)
+    if not match:
+        return None
+    mb, over_s, avg_kbps, limit_kbps, limit_duration_s = match.groups()
+    return {
+        "writes_mb": float(mb),
+        "writes_over_s": float(over_s),
+        "avg_kbps": float(avg_kbps),
+        "limit_kbps": float(limit_kbps),
+        "limit_duration_s": int(limit_duration_s),
+    }
+
+
+def is_claude_diag_report(fields: dict, claude_coalition_id: int | None = None) -> bool:
+    """True when a parsed .diag report's header is Claude Desktop's (X-2)."""
+    coalition = _split_coalition(fields.get("Resource Coalition"))
+    if coalition is not None:
+        if coalition["name"] == _CLAUDE_COALITION_NAME:
+            return True
+        if claude_coalition_id is not None and coalition["id"] == claude_coalition_id:
+            return True
+    path = fields.get("Path")
+    if path and "/Claude.app/" in path:
+        return True
+    return False
+
+
+def _build_diag_record(path: Path, fields: dict, historic: bool) -> dict:
+    coalition = _split_coalition(fields.get("Resource Coalition"))
+    pid = fields.get("PID")
+    raw = {key: fields[key] for key in ("Writes", "Event") if key in fields}
+    record = {
+        "historic": historic,
+        "file": str(path),
+        "event": fields.get("Event"),
+        "action": fields.get("Action taken"),
+        "command": fields.get("Command"),
+        "pid": int(pid) if pid and pid.isdigit() else None,
+        "coalition": coalition,
+        "start": fields.get("Date/Time"),
+        "end": fields.get("End time"),
+        "raw": raw,
+    }
+    writes = parse_writes_line(fields.get("Writes"))
+    if writes is not None:
+        record.update(writes)
+    return record
+
+
+def _current_claude_coalition_id() -> int | None:
+    """Best-effort lookup of Claude's current resource coalition ID, used only
+    to strengthen X-2 matching; report matching works without it (name/path)."""
+    try:
+        all_procs = _iter_processes()
+    except Exception:
+        return None
+    main_proc, _app_path = _find_main(all_procs)
+    if main_proc is None:
+        return None
+    pid = _info(main_proc, "pid")
+    if pid is None:
+        return None
+    return coalition_id(pid)
+
+
+class _DiagEventHandler(FileSystemEventHandler):
+    def __init__(self, watcher: "DiagReportWatcher"):
+        self._watcher = watcher
+
+    def on_created(self, event) -> None:
+        self._watcher._enqueue(event.src_path)
+
+    def on_moved(self, event) -> None:
+        self._watcher._enqueue(event.dest_path)
+
+
+class DiagReportWatcher:
+    """Watches for new Claude macOS diagnostic reports (X-1 - X-5)."""
+
+    def __init__(self, directory: Path = _DIAG_DIR):
+        self._directory = Path(directory)
+        self._lock = threading.Lock()
+        self._queued: set[str] = set()
+        self._pending: dict[str, int] = {}
+        self._seen: set[str] = set()
+        self._observer: Observer | None = None
+        self._watch_error = False
+        self._historic_done = False
+
     def collect(self, now: float) -> dict:
-        return {}
+        if not self._directory_readable():
+            self._teardown_observer()
+            return {"status": "unreadable", "new": [], "historic": []}
+
+        self._ensure_observer()
+        claude_coalition_id = _current_claude_coalition_id()
+
+        historic: list[dict] = []
+        if not self._historic_done:
+            historic = self._startup_scan(claude_coalition_id)
+            self._historic_done = True
+
+        for path in self._pop_queued():
+            if path not in self._seen:
+                self._pending.setdefault(path, 0)
+
+        new: list[dict] = []
+        still_pending: dict[str, int] = {}
+        for path, retries in self._pending.items():
+            status, record = self._try_parse(path, historic=False, claude_coalition_id=claude_coalition_id)
+            if status == "retry":
+                if retries + 1 <= _DIAG_RETRY_LIMIT:
+                    still_pending[path] = retries + 1
+                    continue
+                # gave up: treat as seen so it's never retried again
+            self._seen.add(path)
+            if record is not None:
+                new.append(record)
+        self._pending = still_pending
+
+        return {"status": "ok", "new": new, "historic": historic}
 
     def close(self) -> None:
-        pass
+        self._teardown_observer()
+
+    def _directory_readable(self) -> bool:
+        try:
+            os.listdir(self._directory)
+            return True
+        except OSError:
+            return False
+
+    def _ensure_observer(self) -> None:
+        if self._observer is not None or self._watch_error:
+            return
+        try:
+            observer = Observer()
+            observer.schedule(_DiagEventHandler(self), str(self._directory), recursive=False)
+            observer.start()
+        except Exception:
+            self._watch_error = True
+            return
+        self._observer = observer
+
+    def _teardown_observer(self) -> None:
+        self._watch_error = False
+        if self._observer is None:
+            return
+        try:
+            self._observer.stop()
+            self._observer.join(timeout=2)
+        except Exception:
+            pass
+        self._observer = None
+
+    def _enqueue(self, path: str) -> None:
+        if not path.endswith(".diag"):
+            return
+        with self._lock:
+            self._queued.add(path)
+
+    def _pop_queued(self) -> set[str]:
+        with self._lock:
+            queued, self._queued = self._queued, set()
+        return queued
+
+    def _startup_scan(self, claude_coalition_id: int | None) -> list[dict]:
+        """List Claude reports from the preceding 24h once, without flagging (X-4)."""
+        cutoff = time.time() - _DIAG_HISTORIC_WINDOW_S
+        results: list[dict] = []
+        try:
+            candidates = list(self._directory.glob("*.diag"))
+        except OSError:
+            return results
+        for path in candidates:
+            try:
+                recent = path.stat().st_mtime >= cutoff
+            except OSError:
+                recent = False
+            self._seen.add(str(path))
+            if not recent:
+                continue
+            _status, record = self._try_parse(str(path), historic=True, claude_coalition_id=claude_coalition_id)
+            if record is not None:
+                results.append(record)
+        return results
+
+    def _try_parse(
+        self, path: str, historic: bool, claude_coalition_id: int | None
+    ) -> tuple[str, dict | None]:
+        """Returns ("retry", None) for a not-yet-complete file, else ("done", record-or-None)."""
+        p = Path(path)
+        try:
+            with open(p, "r", errors="replace") as fh:
+                text = fh.read(16384)
+        except (FileNotFoundError, PermissionError, OSError):
+            return "retry", None
+        fields = parse_diag_header("\n".join(text.splitlines()[:80]))
+        if "Event" not in fields:
+            return "retry", None
+        if not is_claude_diag_report(fields, claude_coalition_id):
+            return "done", None
+        return "done", _build_diag_record(p, fields, historic=historic)
+
+
+class SignalsCollector:
+    """Swap counters and macOS diagnostic-report detection (§5)."""
+
+    def __init__(self, diag_dir: Path = _DIAG_DIR):
+        self._swap = SwapSampler()
+        self._diag = DiagReportWatcher(directory=diag_dir)
+
+    def collect(self, now: float) -> dict:
+        return {"swap": self._swap.collect(), "diag": self._diag.collect(now)}
+
+    def close(self) -> None:
+        self._diag.close()
 
 
 # ── §6 Analysis and alerts ── (Plan 06)
@@ -1357,6 +1672,10 @@ def run(args: argparse.Namespace) -> int:
             derived, flag_events = analyzer.analyze(sample)
             sample["derived"] = derived
             sample["active_flags"] = [event["id"] for event in flag_events if event.get("state") == "raised"]
+
+            diag = sample.get("diag") or {}
+            for report in [*diag.get("historic", []), *diag.get("new", [])]:
+                log.write({"type": "diag_report", **report})
 
             log.write(sample)
             for event in flag_events:
