@@ -1,6 +1,6 @@
 # Claude Desktop Resource Monitor — Requirements
 
-Status: agreed requirements, pre-implementation (2026-09-25; revised after issue research R-1 to R-5).
+Status: agreed requirements, pre-implementation (2026-09-25; revised after issue research R-1 to R-5 and the native API probe).
 
 ## 1. Purpose
 
@@ -55,10 +55,18 @@ Observed on the development machine (Apple M5, 32 GB RAM, macOS 26.7, Claude Des
 
 **Claude VM logs**: `~/Library/Logs/Claude/` contains `cowork_vm_swift.log`, `cowork_vm_node.log`, `coworkd.log`, `vzgvisor.log`, `main.log`.
 
+**Native API probe results** (ctypes, no root, 2026-09-25):
+
+- `proc_pidinfo(pid, PROC_PIDCOALITIONINFO=20, …)` returns `coalition_id[0]` (resource coalition). Claude main, helpers and Claude's VM process all report **11603**, the same ID as the `.diag` report's `"com.anthropic.claudefordesktop"(11603)`. Docker's VM reports **11507** (`com.docker.docker`).
+- `responsibility_get_pid_responsible_for_pid` (exported by libSystem) returns the Claude main PID for Claude's VM, and a Docker PID for Docker's VM.
+- `proc_pid_rusage(pid, RUSAGE_INFO_V2, …)` succeeds for Claude's VM process: footprint ~1 GB, write counter readable. The Claude main process had already written ~11.9 GB (the provisioning burst).
+- Claude's coalition also contains **macOS system XPC services working for Claude**: `MTLCompilerService` (several), `com.apple.appkit.xpc.openAndSavePanelService`, `QuickLookUIService`, `CSExattrCryptoService`. macOS charges their resource use to Claude.
+
 **Python/psutil facts**:
 
 - `psutil.Process.io_counters()` is **not available on macOS**.
 - Homebrew/system Python is PEP 668 "externally managed".
+- `psutil.swap_memory().sin/.sout` on macOS equal `vm_stat` `Pageins`/`Pageouts` × page size (file-backed paging), **not** swap. True swap counters are `vm_stat` `Swapins`/`Swapouts`.
 
 ## 4. Functional requirements
 
@@ -66,11 +74,11 @@ Observed on the development machine (Apple M5, 32 GB RAM, macOS 26.7, Claude Des
 
 | ID | Requirement |
 |---|---|
-| P-1 | Tracked set = every process whose executable lives under `/Applications/Claude.app/` **plus** Claude's VM process(es) (P-3). |
+| P-1 | Tracked set = **every process in Claude's resource coalition** (the coalition of the Claude main process `/Applications/Claude.app/Contents/MacOS/Claude`). This includes app helpers, Claude's VM process and macOS system XPC services working for Claude, matching how macOS charges resources to Claude. Fallback when the coalition cannot be determined: every process whose executable lives under `/Applications/Claude.app/` plus Claude's VM process(es) per P-3/P-4. |
 | P-2 | Excluded by default: Claude Code CLI, Zed agent SDK, `Claude Usage.app`, and anything else merely matching "claude". The Claude Code CLI can be included as a separate, clearly labelled group via `--include-cli`. |
-| P-3 | VM attribution, primary: a `com.apple.Virtualization.VirtualMachine` process counts as Claude's if it is in the **same resource coalition** as the Claude main process (coalition ID via `ctypes` `proc_pidinfo(PROC_PIDCOALITIONINFO)`). This matches how macOS itself attributes resources. VMs owned by other apps (Docker, UTM, OrbStack, …) are excluded. |
+| P-3 | VM attribution (explicit check for `com.apple.Virtualization.VirtualMachine` processes; also used in the P-1 fallback), primary: a `com.apple.Virtualization.VirtualMachine` process counts as Claude's if it is in the **same resource coalition** as the Claude main process (coalition ID via `ctypes` `proc_pidinfo(PROC_PIDCOALITIONINFO)`). This matches how macOS itself attributes resources. VMs owned by other apps (Docker, UTM, OrbStack, …) are excluded. |
 | P-4 | VM attribution, fallbacks: if the coalition lookup fails, use the macOS **responsible PID** (`ctypes`, e.g. `responsibility_get_pid_responsible_for_pid`) and require it to be a Claude.app process. If that also fails, fall back to name matching and mark the VM row with `?` (uncertain attribution). |
-| P-5 | Role classification from the command line: `main`, `renderer`, `gpu`, `utility:<sub-type short name>` (e.g. `utility:network`, `utility:node`), `crashpad`, `vm`, `other`. |
+| P-5 | Role classification from the command line: `main`, `renderer`, `gpu`, `utility:<sub-type short name>` (e.g. `utility:network`, `utility:node`), `crashpad`, `vm`, `xpc` (macOS system services under `/System/` in Claude's coalition, other than the VM), `other`. |
 | P-6 | Process set is re-discovered every poll; processes appearing/disappearing (renderer restarts, VM start/stop) must be handled without errors. |
 
 ### 4.2 Grouping
@@ -112,7 +120,7 @@ Observed on the development machine (Apple M5, 32 GB RAM, macOS 26.7, Claude Des
 |---|---|
 | M-1 | Per-process and per-role memory, with Δ and peak: **physical footprint** (`ri_phys_footprint` from `proc_pid_rusage`, the "Memory" figure Activity Monitor shows) as the primary value, plus **RSS**. RSS is used if footprint cannot be read. |
 | M-4 | Memory growth alert: per role and Total Claude, flag when the **5-minute average footprint** is more than **50%** above that role's **rolling-minimum baseline** of the same 5-min average (`--mem-growth`, default `50`). This catches the slow-leak pattern (#22543) and ignores the VM's large but stable allocation (~1.9 GB, #26194/#30972). `b` resets this baseline too. |
-| M-2 | System-wide swap: **swap used** (`sysctl vm.swapusage` / `psutil.swap_memory().used`), cumulative **swap-ins** and **swap-outs** (`psutil.swap_memory().sin/.sout`). |
+| M-2 | System-wide swap: **swap used/total** (`sysctl vm.swapusage`, equivalently `psutil.swap_memory().used/.total`), and cumulative **swap-ins** and **swap-outs** from `vm_stat` `Swapins`/`Swapouts` (pages × page size). **Not** `psutil.swap_memory().sin/.sout`: on macOS these are `vm_stat` `Pageins`/`Pageouts` (file-backed paging), verified 2026-09-25 with psutil 7.2.2. |
 | M-3 | Flag when **swap-outs increase on 3 consecutive polls**. Swap used and swap-ins are displayed and logged but do not trigger the flag. |
 
 ### 4.6 Disk I/O
