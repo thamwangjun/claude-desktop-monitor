@@ -14,6 +14,7 @@ import os
 import platform
 import re
 import signal
+import stat as stat_module
 import subprocess
 import sys
 import threading
@@ -25,6 +26,8 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
 # ── §1 Constants, unit helpers, CLI ──
 
@@ -774,12 +777,400 @@ class ProcessCollector:
 
 # ── §4 Disk collector ── (Plan 04)
 
-class DiskCollector:
-    def collect(self, now: float) -> dict:
+# Immediate children of support/ that get a dedicated "paths" entry. Every
+# other immediate child (and vm_bundles/, split one level further) still
+# becomes a scan unit so support_total and vm_bundles add up correctly.
+_TRACKED_DIR_UNITS = {
+    "cache": "Cache",
+    "code_cache": "Code Cache",
+    "claude_code_vm": "claude-code-vm",
+    "agent_sessions": "local-agent-mode-sessions",
+    "indexeddb": "IndexedDB",
+    "gpucache": "GPUCache",
+}
+
+_BUNDLE_UNIT_KEY = "vm_bundles/claudevm.bundle"
+
+
+def walk_size(root: Path) -> dict:
+    """Recursively sum apparent (st_size) and allocated (st_blocks*512) size under root.
+
+    Symlinks aren't followed (only their own small size is counted). Hard
+    links (nlink > 1) are counted once via an (st_dev, st_ino) set. Entries
+    that vanish mid-walk or can't be read are skipped and counted in
+    "skipped". A missing root returns {"present": False}.
+    """
+    try:
+        root_stat = os.stat(root, follow_symlinks=False)
+    except (FileNotFoundError, NotADirectoryError, PermissionError):
+        return {"present": False}
+
+    apparent = 0
+    allocated = 0
+    files = 0
+    skipped = 0
+    seen_inodes: set[tuple[int, int]] = set()
+
+    def add(st: os.stat_result, is_file: bool) -> None:
+        nonlocal apparent, allocated, files
+        if st.st_nlink > 1:
+            key = (st.st_dev, st.st_ino)
+            if key in seen_inodes:
+                return
+            seen_inodes.add(key)
+        allocated += st.st_blocks * 512
+        if is_file:
+            apparent += st.st_size
+            files += 1
+
+    add(root_stat, is_file=False)
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except (FileNotFoundError, PermissionError, NotADirectoryError):
+            skipped += 1
+            continue
+        for entry in entries:
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except (FileNotFoundError, PermissionError):
+                skipped += 1
+                continue
+            if entry.is_symlink():
+                add(st, is_file=False)
+            elif stat_module.S_ISDIR(st.st_mode):
+                add(st, is_file=False)
+                stack.append(entry.path)
+            else:
+                add(st, is_file=True)
+    return {"present": True, "apparent": apparent, "allocated": allocated, "files": files, "skipped": skipped}
+
+
+def _walk_loose_files(directory: Path) -> dict:
+    """Like walk_size, but only immediate files in directory (subdirs are their own units)."""
+    try:
+        entries = list(os.scandir(directory))
+    except (FileNotFoundError, PermissionError, NotADirectoryError):
+        return {"present": False}
+    apparent = 0
+    allocated = 0
+    files = 0
+    seen_inodes: set[tuple[int, int]] = set()
+    for entry in entries:
+        try:
+            st = entry.stat(follow_symlinks=False)
+        except (FileNotFoundError, PermissionError):
+            continue
+        if not entry.is_symlink() and stat_module.S_ISDIR(st.st_mode):
+            continue
+        if st.st_nlink > 1:
+            key = (st.st_dev, st.st_ino)
+            if key in seen_inodes:
+                continue
+            seen_inodes.add(key)
+        allocated += st.st_blocks * 512
+        apparent += st.st_size
+        files += 1
+    return {"present": True, "apparent": apparent, "allocated": allocated, "files": files, "skipped": 0}
+
+
+def _vm_bundles_unit_specs(vm_bundles: Path) -> list[tuple[str, Path]]:
+    specs: list[tuple[str, Path]] = []
+    try:
+        entries = list(os.scandir(vm_bundles))
+    except (FileNotFoundError, PermissionError, NotADirectoryError):
+        return specs
+    loose_files = False
+    for entry in entries:
+        try:
+            is_dir = entry.is_dir(follow_symlinks=False)
+        except OSError:
+            continue
+        if is_dir:
+            specs.append((f"vm_bundles/{entry.name}", Path(entry.path)))
+        else:
+            loose_files = True
+    if loose_files:
+        specs.append(("vm_bundles:files", vm_bundles))
+    return specs
+
+
+def _unit_specs(support: Path) -> dict[str, Path]:
+    """Every scan unit currently on disk: immediate children of support/, with
+    vm_bundles/ split one level further (D-5 scan-unit granularity)."""
+    specs: list[tuple[str, Path]] = []
+    try:
+        entries = list(os.scandir(support))
+    except (FileNotFoundError, PermissionError, NotADirectoryError):
         return {}
+    loose_files = False
+    for entry in entries:
+        try:
+            is_dir = entry.is_dir(follow_symlinks=False)
+        except OSError:
+            continue
+        if not is_dir:
+            loose_files = True
+            continue
+        if entry.name == "vm_bundles":
+            specs.extend(_vm_bundles_unit_specs(Path(entry.path)))
+        else:
+            specs.append((entry.name, Path(entry.path)))
+    if loose_files:
+        specs.append(("support:files", support))
+    return dict(specs)
+
+
+def _partial_files(root: Path, relative_to: Path) -> list[dict]:
+    """*.partial files anywhere under root (D-8), with age in seconds."""
+    if not root.is_dir():
+        return []
+    now = time.time()
+    results = []
+    try:
+        candidates = list(root.rglob("*.partial"))
+    except OSError:
+        return results
+    for path in candidates:
+        try:
+            st = path.stat()
+        except (FileNotFoundError, PermissionError):
+            continue
+        results.append({
+            "path": str(path.relative_to(relative_to)),
+            "age_s": round(max(0.0, now - st.st_mtime), 1),
+            "apparent": st.st_size,
+            "allocated": st.st_blocks * 512,
+        })
+    return results
+
+
+@dataclass
+class _UnitStats:
+    apparent: int = 0
+    allocated: int = 0
+    files: int = 0
+    scan_ms: float | None = None
+    walked_at: float | None = None  # monotonic time of the last walk
+
+
+class _DirtyHandler(FileSystemEventHandler):
+    """Marks scan units dirty from watchdog events. Runs on watchdog's thread; never walks."""
+
+    def __init__(self, collector: "DiskCollector"):
+        self._collector = collector
+
+    def on_created(self, event) -> None:
+        self._collector._mark_dirty(event.src_path)
+
+    def on_deleted(self, event) -> None:
+        self._collector._mark_dirty(event.src_path)
+
+    def on_modified(self, event) -> None:
+        self._collector._mark_dirty(event.src_path)
+
+    def on_moved(self, event) -> None:
+        self._collector._mark_dirty(event.src_path)
+        self._collector._mark_dirty(event.dest_path)
+
+
+class DiskCollector:
+    """Disk footprint of the Claude support directory and Cowork VM bundle (§4)."""
+
+    def __init__(self, support_dir: str, full_rescan: float = 300.0):
+        # Resolved so it matches the (symlink-resolved) paths watchdog's FSEvents
+        # backend reports on macOS, e.g. /tmp -> /private/tmp.
+        self._support = Path(support_dir).resolve()
+        self._full_rescan = full_rescan
+        self._lock = threading.Lock()
+        self._dirty: set[str] = set()
+        self._units: dict[str, _UnitStats] = {}
+        self._observer: Observer | None = None
+        self._watch_error = False
+        self._last_full_rescan = float("-inf")
+
+    def collect(self, now: float) -> dict:
+        if not self._support.is_dir():
+            self._teardown_observer()
+            self._units.clear()
+            return {"paths": self._absent_paths(), "bundle": {"present": False}}
+
+        self._ensure_observer()
+        dirty = self._pop_dirty()
+        force_all = "__all__" in dirty
+        if now - self._last_full_rescan >= self._full_rescan:
+            force_all = True
+            self._last_full_rescan = now
+
+        bundle = self._collect_bundle(now)
+
+        specs = _unit_specs(self._support)
+        for key, path in specs.items():
+            if key == _BUNDLE_UNIT_KEY:
+                continue  # fed by _collect_bundle, walked every poll regardless
+            if force_all or key in dirty or key not in self._units:
+                self._rewalk_unit(key, path, now)
+        for key in [k for k in self._units if k not in specs]:
+            del self._units[key]
+
+        return {"paths": self._build_paths(now), "bundle": bundle}
 
     def close(self) -> None:
-        pass
+        self._teardown_observer()
+
+    # -- observer plumbing --
+
+    def _ensure_observer(self) -> None:
+        if self._observer is not None or self._watch_error:
+            return
+        try:
+            observer = Observer()
+            observer.schedule(_DirtyHandler(self), str(self._support), recursive=True)
+            observer.start()
+        except Exception:
+            self._watch_error = True
+            return
+        self._observer = observer
+
+    def _teardown_observer(self) -> None:
+        self._watch_error = False
+        if self._observer is None:
+            return
+        try:
+            self._observer.stop()
+            self._observer.join(timeout=2)
+        except Exception:
+            pass
+        self._observer = None
+
+    def _mark_dirty(self, event_path: str) -> None:
+        try:
+            rel = Path(event_path).relative_to(self._support)
+        except ValueError:
+            return
+        parts = rel.parts
+        if not parts:
+            keys = ["__all__"]
+        elif parts[0] == "vm_bundles":
+            if len(parts) == 1:
+                keys = ["__all__"]
+            elif len(parts) == 2:
+                keys = [f"vm_bundles/{parts[1]}", "vm_bundles:files"]
+            else:
+                keys = [f"vm_bundles/{parts[1]}"]
+        elif len(parts) == 1:
+            keys = [parts[0], "support:files"]
+        else:
+            keys = [parts[0]]
+        with self._lock:
+            self._dirty.update(keys)
+
+    def _pop_dirty(self) -> set[str]:
+        with self._lock:
+            dirty, self._dirty = self._dirty, set()
+        return dirty
+
+    # -- walking --
+
+    def _rewalk_unit(self, key: str, path: Path, now: float) -> None:
+        started = time.monotonic()
+        result = _walk_loose_files(path) if key.endswith(":files") else walk_size(path)
+        scan_ms = (time.monotonic() - started) * 1000
+        if result.get("present"):
+            self._units[key] = _UnitStats(
+                apparent=result["apparent"], allocated=result["allocated"],
+                files=result["files"], scan_ms=scan_ms, walked_at=now,
+            )
+        else:
+            self._units.pop(key, None)
+
+    def _collect_bundle(self, now: float) -> dict:
+        bundle_path = self._support / "vm_bundles" / "claudevm.bundle"
+        started = time.monotonic()
+        if not bundle_path.is_dir():
+            self._units.pop(_BUNDLE_UNIT_KEY, None)
+            return {"present": False}
+
+        files: dict[str, dict] = {}
+        rows = {name: {"apparent": 0, "allocated": 0} for name in ("rootfs.img", "sessiondata.img", "other")}
+        total_apparent = 0
+        total_allocated = 0
+        for entry_path in bundle_path.rglob("*"):
+            try:
+                st = entry_path.lstat()
+            except (FileNotFoundError, PermissionError):
+                continue
+            if not entry_path.is_symlink() and stat_module.S_ISDIR(st.st_mode):
+                continue
+            apparent = st.st_size
+            allocated = st.st_blocks * 512
+            rel = str(entry_path.relative_to(bundle_path))
+            files[rel] = {"apparent": apparent, "allocated": allocated}
+            total_apparent += apparent
+            total_allocated += allocated
+            row = entry_path.name if entry_path.name in rows else "other"
+            rows[row]["apparent"] += apparent
+            rows[row]["allocated"] += allocated
+        rows["total"] = {"apparent": total_apparent, "allocated": total_allocated}
+
+        zst_present = (bundle_path / "rootfs.img.zst").exists()
+        partials = _partial_files(self._support / "vm_bundles", self._support)
+        scan_ms = (time.monotonic() - started) * 1000
+
+        self._units[_BUNDLE_UNIT_KEY] = _UnitStats(
+            apparent=total_apparent, allocated=total_allocated,
+            files=len(files), scan_ms=scan_ms, walked_at=now,
+        )
+        return {
+            "present": True, "rows": rows, "files": files,
+            "zst_present": zst_present, "partials": partials, "scan_ms": round(scan_ms, 2),
+        }
+
+    # -- reporting --
+
+    def _unit_dict(self, unit: _UnitStats, now: float) -> dict:
+        return {
+            "present": True,
+            "apparent": unit.apparent,
+            "allocated": unit.allocated,
+            "files": unit.files,
+            "scan_ms": round(unit.scan_ms, 2) if unit.scan_ms is not None else None,
+            "last_scan_elapsed": round(now - unit.walked_at, 1) if unit.walked_at is not None else None,
+        }
+
+    def _absent_paths(self) -> dict:
+        names = ["support_total", "vm_bundles", "vm_warm", *_TRACKED_DIR_UNITS.keys()]
+        return {name: {"present": False} for name in names}
+
+    def _build_paths(self, now: float) -> dict:
+        paths: dict[str, dict] = {}
+        for name, dirname in _TRACKED_DIR_UNITS.items():
+            unit = self._units.get(dirname)
+            paths[name] = self._unit_dict(unit, now) if unit is not None else {"present": False}
+
+        warm_unit = self._units.get("vm_bundles/warm")
+        paths["vm_warm"] = self._unit_dict(warm_unit, now) if warm_unit is not None else {"present": False}
+
+        if (self._support / "vm_bundles").is_dir():
+            bundle_keys = [k for k in self._units if k == "vm_bundles:files" or k.startswith("vm_bundles/")]
+            paths["vm_bundles"] = {
+                "present": True,
+                "apparent": sum(self._units[k].apparent for k in bundle_keys),
+                "allocated": sum(self._units[k].allocated for k in bundle_keys),
+                "files": sum(self._units[k].files for k in bundle_keys),
+            }
+        else:
+            paths["vm_bundles"] = {"present": False}
+
+        paths["support_total"] = {
+            "present": True,
+            "apparent": sum(unit.apparent for unit in self._units.values()),
+            "allocated": sum(unit.allocated for unit in self._units.values()),
+            "files": sum(unit.files for unit in self._units.values()),
+        }
+        return paths
 
 
 # ── §5 System signals (swap, .diag reports) ── (Plan 05)
@@ -932,7 +1323,7 @@ def run(args: argparse.Namespace) -> int:
     log = LogWriter(args.log)
     collectors = [
         ProcessCollector(include_cli=args.include_cli, trace_io=args.trace_io),
-        DiskCollector(),
+        DiskCollector(support_dir=args.support_dir, full_rescan=args.full_rescan),
         SignalsCollector(),
     ]
     analyzer = Analyzer()
