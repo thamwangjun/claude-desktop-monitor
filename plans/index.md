@@ -133,7 +133,7 @@ Planning probes changed REQUIREMENTS.md in two places. Both are already applied 
 |---|---|
 | 01 | Done (5681d43) — added `conftest.py` at repo root (not listed in Plan 01's file table) so `uv run pytest` can `import monitor` without packaging the script; no other deviations |
 | 02 | Done (84efa5c) — no deviations; live tests confirmed Claude's Cowork VM (coalition 11603) matched and Docker's VM (coalition 11507) excluded on this run |
-| 03 | Done (pending commit) — deviation: the CLI-group name match (`is_cli_process`) accepts both `claude` and `claude.exe` basenames, because this machine's mise/npm global install shims the Claude Code CLI as `claude.exe`; the plan assumed a bare `claude` basename. `--trace-io` line parsing (`parse_fs_usage_line`) splits fs_usage columns on runs of 2+ spaces rather than plain whitespace, since paths under the support dir contain single embedded spaces (e.g. "Application Support"). Not yet live-verified: `--trace-io` (needs user sudo) and quit/relaunch mid-run (needs user, per Hard rules never to quit Claude Desktop). |
+| 03 | Done (4e0d673) — deviation: the CLI-group name match (`is_cli_process`) accepts both `claude` and `claude.exe` basenames, because this machine's mise/npm global install shims the Claude Code CLI as `claude.exe`; the plan assumed a bare `claude` basename. `--trace-io` line parsing (`parse_fs_usage_line`) splits fs_usage columns on runs of 2+ spaces rather than plain whitespace, since paths under the support dir contain single embedded spaces (e.g. "Application Support"). Not yet live-verified: `--trace-io` (needs user sudo) and quit/relaunch mid-run (needs user, per Hard rules never to quit Claude Desktop). |
 | 04 | Not started |
 | 05 | Not started |
 | 06 | Not started |
