@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import importlib.metadata
 import json
 import os
 import platform
@@ -43,6 +44,7 @@ from watchdog.observers import Observer
 # ── §1 Constants, unit helpers, CLI ──
 
 DEFAULT_SUPPORT_DIR = "~/Library/Application Support/Claude"
+DEFAULT_LOG_DIR = Path.home() / "Library" / "Logs" / "claude-desktop-monitor"
 
 _DECIMAL_SUFFIXES = {"": 1, "b": 1, "kb": 10**3, "mb": 10**6, "gb": 10**9, "tb": 10**12}
 _BINARY_SUFFIXES = {"kib": 2**10, "mib": 2**20, "gib": 2**30, "tib": 2**40}
@@ -128,7 +130,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bundle-rate", type=_size_arg, default=parse_size("100MB"),
                          help="bundle growth per 10 min alert, bytes (default 100MB)")
     parser.add_argument("--log", type=str, default=None,
-                         help="log file path (default ./logs/monitor-<timestamp>.jsonl)")
+                         help="log file path (default ~/Library/Logs/claude-desktop-monitor/"
+                              "monitor-<timestamp>.jsonl)")
     parser.add_argument("--no-tui", action="store_true",
                          help="headless logging mode, no live table")
     parser.add_argument("--include-cli", action="store_true",
@@ -162,7 +165,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args.support_dir = os.path.expanduser(args.support_dir)
     if args.log is None:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        args.log = str(Path("logs") / f"monitor-{timestamp}.jsonl")
+        args.log = str(DEFAULT_LOG_DIR / f"monitor-{timestamp}.jsonl")
     return args
 
 
@@ -2845,6 +2848,10 @@ def _collect_versions() -> dict:
     versions["macos"] = platform.mac_ver()[0]
     versions["claude_app"] = _claude_app_version()
     versions["native"] = dict(NATIVE_AVAILABLE)
+    try:
+        versions["monitor"] = importlib.metadata.version("claude-desktop-monitor")
+    except importlib.metadata.PackageNotFoundError:
+        versions["monitor"] = "unknown"
     return versions
 
 

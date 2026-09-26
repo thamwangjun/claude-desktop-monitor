@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 One module, `src/claude_desktop_monitor/monitor.py`: a macOS-only terminal tool that watches Claude Desktop's resource usage over time (especially the Cowork Linux VM), logs JSONL, raises flags against fixed rules, sends macOS notifications, and shows a `rich` TUI or runs headless. **Observability only.**
 
-`PLAN_EXEC_INSTRUCTIONS.md` is the full working guide (verified technical facts, hard rules, git rules, user-only checks). Read it before non-trivial changes. Docs by authority: `requirements/REQUIREMENTS-v1.md` → `REQUIREMENTS-v2.md` → `REQUIREMENTS-v3.md` (each later version wins where it amends an earlier one) → `plans/index.md` (status table, conventions) → `plans/NN-*.md`. If a plan conflicts with the requirements, stop and ask the user. v1 (plans 01–08) and v2 (09–12) are done; v3 (13–17, Homebrew distribution) is in progress: 13 (package conversion) is done, 14–17 are not started. The log location, `versions.monitor` and the 0.3.0 version below are pre-14 until that plan lands.
+`PLAN_EXEC_INSTRUCTIONS.md` is the full working guide (verified technical facts, hard rules, git rules, user-only checks). Read it before non-trivial changes. Docs by authority: `requirements/REQUIREMENTS-v1.md` → `REQUIREMENTS-v2.md` → `REQUIREMENTS-v3.md` (each later version wins where it amends an earlier one) → `plans/index.md` (status table, conventions) → `plans/NN-*.md`. If a plan conflicts with the requirements, stop and ask the user. v1 (plans 01–08) and v2 (09–12) are done; v3 (13–17, Homebrew distribution) is in progress: 13 (package conversion) and 14 (runtime changes) are done, 15–17 are not started. The default log location is now `~/Library/Logs/claude-desktop-monitor/` (its own directory, separate from and unrelated to the read-only `~/Library/Logs/Claude/` below), `session_start.versions.monitor` reports the installed package version, and the package version is 0.3.0.
 
 ## Commands
 
@@ -58,7 +58,7 @@ Non-obvious facts (details in `PLAN_EXEC_INSTRUCTIONS.md` §6):
 
 ## Hard rules
 
-- Never modify, delete or move anything under `~/Library/Application Support/Claude/`, `~/Library/Logs/Claude/` or `/Library/Logs/DiagnosticReports/`, in code or while testing. Tests use `tmp_path`; manual runs use `--support-dir /tmp/...`.
+- Never modify, delete or move anything under `~/Library/Application Support/Claude/`, `~/Library/Logs/Claude/` or `/Library/Logs/DiagnosticReports/`, in code or while testing. Tests use `tmp_path`; manual runs use `--support-dir /tmp/...`. `~/Library/Logs/claude-desktop-monitor/` is the monitor's own log directory (default `--log` destination), not covered by this rule; tests still never write there — pass `--log` under `tmp_path`.
 - Never run `sudo` (only `--trace-io` uses it, and the user runs that themselves). Never kill/restart Claude Desktop, its VM or Docker; ask the user.
 - Unit tests use a fake notification sender/backend, never real banners. Never change macOS notification/Focus settings.
 - README may cite only the 9 issues approved in `REQUIREMENTS-v1.md` §11.

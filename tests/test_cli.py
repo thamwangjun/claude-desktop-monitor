@@ -1,3 +1,5 @@
+import importlib.metadata
+
 import pytest
 
 from claude_desktop_monitor import monitor
@@ -64,7 +66,7 @@ def test_interval_above_bounds_rejected():
 
 def test_default_log_path_pattern():
     args = monitor.parse_args([])
-    assert args.log.startswith("logs/monitor-")
+    assert args.log.startswith(str(monitor.DEFAULT_LOG_DIR / "monitor-"))
     assert args.log.endswith(".jsonl")
 
 
@@ -103,6 +105,11 @@ def test_notify_defaults():
 def test_no_notify_flag_parses():
     args = monitor.parse_args(["--no-notify"])
     assert args.no_notify is True
+
+
+def test_collect_versions_monitor_matches_installed_package():
+    versions = monitor._collect_versions()
+    assert versions["monitor"] == importlib.metadata.version("claude-desktop-monitor")
 
 
 def test_notify_cooldown_custom_value():

@@ -35,7 +35,7 @@ If a plan and the requirements conflict, the requirements win (the later version
 Plans:
 - **v1:** `01-scaffold`, `02-native-layer`, `03-processes`, `04-disk-footprint`, `05-system-signals`, `06-analysis-alerts`, `07-tui`, `08-readme-verification`. Default order is 01 → 08. Plans 02, 04 and 05 each depend only on 01. All are done.
 - **v2:** `09-notifier`, `10-notification-policy`, `11-lifecycle-ui`, `12-readme-verification`. **Strictly sequential**, 09 → 12: 10 and 11 both edit `run()` and the shutdown path. All are done.
-- **v3:** `13-package-conversion`, `14-runtime-changes`, `15-readme-release`, `16-formula-tap`, `17-v3-verification`. **Strictly sequential**, 13 → 17. Plans 15, 16 and 17 each end at a **user gate** (tag, PR, publish); the next plan can't start before it. 13 is done; 14–17 are not started.
+- **v3:** `13-package-conversion`, `14-runtime-changes`, `15-readme-release`, `16-formula-tap`, `17-v3-verification`. **Strictly sequential**, 13 → 17. Plans 15, 16 and 17 each end at a **user gate** (tag, PR, publish); the next plan can't start before it. 13 and 14 are done; 15–17 are not started.
 
 ## 3. How to execute a plan (every session)
 
@@ -187,6 +187,10 @@ Processes that match a naive "claude" name search but are **not** Claude Desktop
 ### Claude logs
 
 `~/Library/Logs/Claude/`: `cowork_vm_swift.log`, `cowork_vm_node.log`, `coworkd.log`, `vzgvisor.log`, `main.log`. **Not parsed by the monitor** (non-goal); the README only points to them.
+
+### The monitor's own log directory (from Plan 14)
+
+Default `--log` destination, with no `--log` given, is `~/Library/Logs/claude-desktop-monitor/monitor-<timestamp>.jsonl` (directory created if missing). This is the monitor's **own** directory, distinct from the read-only `~/Library/Logs/Claude/` above; it is not covered by the observability-only hard rule below. Unit tests still never write there — always pass `--log` under `tmp_path`. `session_start.versions.monitor` records the installed package version (`importlib.metadata.version("claude-desktop-monitor")`, `"unknown"` if not installed); the package version is 0.3.0.
 
 ## 7. Hard rules
 

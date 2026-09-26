@@ -101,7 +101,7 @@ CLI flags (`uv run claude-desktop-monitor --help`):
 | `--mem-growth PCT` | 50 | Memory footprint growth-over-baseline alert, % |
 | `--bundle-growth BYTES` | 1GB | Bundle growth-since-start alert, bytes |
 | `--bundle-rate BYTES` | 100MB | Bundle growth per 10 min alert, bytes |
-| `--log LOG` | `./logs/monitor-<timestamp>.jsonl` | Log file path |
+| `--log LOG` | `~/Library/Logs/claude-desktop-monitor/monitor-<timestamp>.jsonl` | Log file path |
 | `--no-tui` | off | Headless logging mode, no live table |
 | `--include-cli` | off | Also track the Claude Code CLI as a separate group |
 | `--trace-io` | off | Elevated `sudo fs_usage` file-level write tracing |
