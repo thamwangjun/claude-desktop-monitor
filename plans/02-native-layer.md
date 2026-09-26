@@ -1,6 +1,6 @@
 # Plan 02: macOS native layer (ctypes)
 
-Part of the Claude Desktop Resource Monitor build. Full requirements: [`../REQUIREMENTS.md`](../REQUIREMENTS.md). Execution order and rationale: [`index.md`](index.md).
+Part of the Claude Desktop Resource Monitor build. Full requirements: [`../requirements/REQUIREMENTS-v1.md`](../requirements/REQUIREMENTS-v1.md). Execution order and rationale: [`index.md`](index.md).
 
 ## Context
 
@@ -90,7 +90,7 @@ Plan 01 complete (project scaffold, `monitor.py` sections, pytest).
 - [ ] `session_start` in a fresh log lists all three native symbols as available.
 - [ ] Committed.
 
-## Plan-level decisions (not specified in REQUIREMENTS.md)
+## Plan-level decisions (not specified in requirements/REQUIREMENTS-v1.md)
 
 - `rusage_info_v2` is used rather than newer versions: it is the oldest struct with the needed fields, which keeps the layout stable.
 - The jetsam coalition ID (index 1) is ignored.

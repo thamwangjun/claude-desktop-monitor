@@ -1,6 +1,6 @@
 # Plan 05: System and external signals (swap, macOS diagnostic reports)
 
-Part of the Claude Desktop Resource Monitor build. Full requirements: [`../REQUIREMENTS.md`](../REQUIREMENTS.md). Execution order and rationale: [`index.md`](index.md).
+Part of the Claude Desktop Resource Monitor build. Full requirements: [`../requirements/REQUIREMENTS-v1.md`](../requirements/REQUIREMENTS-v1.md). Execution order and rationale: [`index.md`](index.md).
 
 ## Context
 
@@ -126,7 +126,7 @@ Sample fragment:
 - [ ] Making the directory unreadable (simulated in a test by pointing the watcher at a mode-000 temp dir) → `status: "unreadable"`, no exception.
 - [ ] `uv run pytest` passes. Committed.
 
-## Plan-level decisions (not specified in REQUIREMENTS.md)
+## Plan-level decisions (not specified in requirements/REQUIREMENTS-v1.md)
 
 - `pageins_bytes`/`pageouts_bytes` are logged for context, but never drive a flag.
 - Incomplete reports are retried for two polls.

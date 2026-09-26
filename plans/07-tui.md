@@ -1,6 +1,6 @@
 # Plan 07: TUI
 
-Part of the Claude Desktop Resource Monitor build. Full requirements: [`../REQUIREMENTS.md`](../REQUIREMENTS.md). Execution order and rationale: [`index.md`](index.md).
+Part of the Claude Desktop Resource Monitor build. Full requirements: [`../requirements/REQUIREMENTS-v1.md`](../requirements/REQUIREMENTS-v1.md). Execution order and rationale: [`index.md`](index.md).
 
 ## Context
 
@@ -125,7 +125,7 @@ If stdin is not a TTY (e.g. piped input) while stdout is a TTY, run the TUI with
 - [ ] An 80×24 terminal shows the header and the first panels without garbling, with a cropped note.
 - [ ] `uv run pytest` passes. Committed.
 
-## Plan-level decisions (not specified in REQUIREMENTS.md)
+## Plan-level decisions (not specified in requirements/REQUIREMENTS-v1.md)
 
 - One panel per metric family (CPU, memory, I/O, footprint, system), so U-2's column set fits.
 - Two-column layout at ≥ 160 columns.

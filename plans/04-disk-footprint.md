@@ -1,6 +1,6 @@
 # Plan 04: Disk footprint
 
-Part of the Claude Desktop Resource Monitor build. Full requirements: [`../REQUIREMENTS.md`](../REQUIREMENTS.md). Execution order and rationale: [`index.md`](index.md).
+Part of the Claude Desktop Resource Monitor build. Full requirements: [`../requirements/REQUIREMENTS-v1.md`](../requirements/REQUIREMENTS-v1.md). Execution order and rationale: [`index.md`](index.md).
 
 ## Context
 
@@ -131,7 +131,7 @@ APFS clones share blocks but are counted per file, as `du` does. This is a known
 - [ ] Per-poll time spent in the disk collector stays under ~50 ms on the reference machine, outside full rescans.
 - [ ] `uv run pytest` passes. Committed.
 
-## Plan-level decisions (not specified in REQUIREMENTS.md)
+## Plan-level decisions (not specified in requirements/REQUIREMENTS-v1.md)
 
 - Scan-unit granularity: immediate children of `support/`, and of `vm_bundles/`.
 - Hard links are de-duplicated; APFS clones are not.

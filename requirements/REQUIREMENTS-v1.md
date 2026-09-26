@@ -248,7 +248,7 @@ The spec's original absolute ">5 GB VM bundle" alert is **dropped**: a fresh bun
    - how to interpret sustained growth / CPU climb / swap-out streaks as signals;
    - the alert rules and CLI flags;
    - where to look next when a flag fires: the Claude VM logs in `~/Library/Logs/Claude/` (e.g. `guest_vsock_connect started` with no matching `completed` means the VM is stalled at boot, per #87794; a repeating download message means a re-download loop, per #51913) and the `.diag` reports in `/Library/Logs/DiagnosticReports/`.
-4. This `REQUIREMENTS.md`.
+4. This `requirements/REQUIREMENTS-v1.md`.
 
 ## 9. Verification
 

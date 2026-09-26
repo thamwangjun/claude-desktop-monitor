@@ -1,6 +1,6 @@
 # Plan 01: Scaffold and core loop
 
-Part of the Claude Desktop Resource Monitor build. Full requirements: [`../REQUIREMENTS.md`](../REQUIREMENTS.md). Execution order and rationale: [`index.md`](index.md).
+Part of the Claude Desktop Resource Monitor build. Full requirements: [`../requirements/REQUIREMENTS-v1.md`](../requirements/REQUIREMENTS-v1.md). Execution order and rationale: [`index.md`](index.md).
 
 ## Context
 
@@ -15,7 +15,7 @@ This plan creates the project skeleton that every later plan plugs into: tooling
 ## Prerequisites
 
 - mise installed (reference machine: mise 2026.9.11).
-- Git repo at the project root containing `REQUIREMENTS.md`.
+- Git repo at the project root containing `requirements/REQUIREMENTS-v1.md`.
 
 ## Requirements covered
 
@@ -162,7 +162,7 @@ Size parsing: accepts a plain integer (bytes) or a number with a suffix. `KB`/`M
 - [ ] `uv run pytest` passes.
 - [ ] Committed.
 
-## Plan-level decisions (not specified in REQUIREMENTS.md)
+## Plan-level decisions (not specified in requirements/REQUIREMENTS-v1.md)
 
 - Tests use `pytest` as a **dev-only** dependency group; tests live in `tests/`. The application stays a single script.
 - `session_end` record type added (clean-shutdown evidence for long runs).

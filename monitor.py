@@ -375,7 +375,7 @@ def _find_main(all_procs: list[psutil.Process]) -> tuple[psutil.Process | None, 
 
 
 def classify_role(exe: str | None, cmdline: list[str], main_exe: str | None, app_prefix: str | None) -> str:
-    """Role classification per REQUIREMENTS.md P-5, evaluated in a fixed order."""
+    """Role classification per requirements/REQUIREMENTS-v1.md P-5, evaluated in a fixed order."""
     if exe and exe == main_exe:
         return "main"
     if exe and os.path.basename(exe) == _VM_PROCESS_NAME:

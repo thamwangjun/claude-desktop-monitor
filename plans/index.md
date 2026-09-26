@@ -16,7 +16,7 @@ The tool samples processes, disk footprint, swap and macOS diagnostic reports ev
 - Tool versions pinned by mise: Python 3.14.7, uv 0.12.18.
 - Runtime dependencies: `psutil`, `rich`, `watchdog`.
 
-The authoritative specification is [`../REQUIREMENTS.md`](../REQUIREMENTS.md). Every plan restates the requirements it covers, so each can be read on its own.
+The authoritative specification is [`../requirements/REQUIREMENTS-v1.md`](../requirements/REQUIREMENTS-v1.md). Every plan restates the requirements it covers, so each can be read on its own.
 
 ## The plans
 
@@ -99,7 +99,7 @@ I-5 (`--trace-io`) was not named in the original eight-plan outline; it is assig
 
 ## Plan-level decisions for review
 
-These choices are made in the plans but are **not** specified in REQUIREMENTS.md. Review them before or during execution. Each plan lists its own.
+These choices are made in the plans but are **not** specified in requirements/REQUIREMENTS-v1.md. Review them before or during execution. Each plan lists its own.
 
 | Plan | Decision |
 |---|---|
@@ -122,7 +122,7 @@ These choices are made in the plans but are **not** specified in REQUIREMENTS.md
 
 ## Requirements changes made while planning (2026-09-25)
 
-Planning probes changed REQUIREMENTS.md in two places. Both are already applied there:
+Planning probes changed requirements/REQUIREMENTS-v1.md in two places. Both are already applied there:
 
 - **P-1, P-3, P-5:** the tracked set is the whole Claude resource coalition, including macOS XPC helpers as role `xpc`. This came from the native-API probe and was approved by the user.
 - **M-2:** swap-ins and swap-outs now come from `vm_stat` `Swapins`/`Swapouts`, because psutil's `sin`/`sout` on macOS are file page-ins and page-outs, not swap. Without this change, the M-3 swap-streak flag would fire on ordinary file I/O.

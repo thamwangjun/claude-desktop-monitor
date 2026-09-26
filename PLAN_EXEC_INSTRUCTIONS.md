@@ -20,11 +20,11 @@ It is observability only (see §7 Hard rules).
 
 | File | Role |
 |---|---|
-| `REQUIREMENTS.md` | Authoritative spec. Requirement IDs (P-, G-, D-, C-, M-, I-, T-, U-, K-, H-, L-, X-, E-, V-), alert rules (§5), CLI flags (§6), approved citations (§11). |
+| `requirements/REQUIREMENTS-v1.md` | Authoritative spec. Requirement IDs (P-, G-, D-, C-, M-, I-, T-, U-, K-, H-, L-, X-, E-, V-), alert rules (§5), CLI flags (§6), approved citations (§11). |
 | `plans/index.md` | Execution order, dependencies, per-plan workflow, shared conventions, traceability, plan-level decisions, **status table**. |
 | `plans/NN-*.md` | The plan to execute: context, requirements covered, design, tasks, verification checklist, plan-level decisions, out of scope. |
 
-If a plan and `REQUIREMENTS.md` conflict, `REQUIREMENTS.md` wins. Stop and raise the conflict with the user; don't pick one silently.
+If a plan and `requirements/REQUIREMENTS-v1.md` conflict, `requirements/REQUIREMENTS-v1.md` wins. Stop and raise the conflict with the user; don't pick one silently.
 
 Plans: `01-scaffold`, `02-native-layer`, `03-processes`, `04-disk-footprint`, `05-system-signals`, `06-analysis-alerts`, `07-tui`, `08-readme-verification`. Default order is 01 → 08. Plans 02, 04 and 05 each depend only on 01.
 
@@ -161,7 +161,7 @@ Processes that match a naive "claude" name search but are **not** Claude Desktop
 - **No sudo in default mode.** Only `--trace-io` may call `sudo`, and only after an explicit `sudo -v` prompt. Never run sudo yourself during a session; the user must type the password (§9).
 - **Don't kill or restart** Claude Desktop, its VM or Docker. When a check needs that, ask the user.
 - **Don't reverse-engineer or modify** Claude Desktop or its VM.
-- **Citations:** the README may cite only the 9 issues approved in `REQUIREMENTS.md` §11. #51913 needs explicit user approval first.
+- **Citations:** the README may cite only the 9 issues approved in `requirements/REQUIREMENTS-v1.md` §11. #51913 needs explicit user approval first.
 - **No scope creep:** no new flags, dependencies, files or behaviours beyond the plan. Anything missing → raise it at the checkpoint.
 
 ## 8. Git
@@ -201,4 +201,4 @@ Time-sensitive: the Claude `.diag` report above is inside the 24 h startup windo
 - **Ambiguity:** don't guess. Ask with the AskUserQuestion tool, **one question per call**, with your recommendation first, labelled "(Recommended)". If they answer with free text, e.g. "research this" or "use X", do that and re-ask the same item before moving on.
 - Choices between alternatives: present a short comparison table (pros/cons, concrete numbers) and let the user decide.
 - Report outcomes faithfully. Failures are shown with their actual output; skipped steps are stated as skipped.
-- Record any new requirement-level decision in `REQUIREMENTS.md`, and any plan-level one in the plan or status note, in the same commit.
+- Record any new requirement-level decision in `requirements/REQUIREMENTS-v1.md`, and any plan-level one in the plan or status note, in the same commit.

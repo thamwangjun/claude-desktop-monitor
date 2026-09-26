@@ -1,6 +1,6 @@
 # Plan 06: Analysis and alerts
 
-Part of the Claude Desktop Resource Monitor build. Full requirements: [`../REQUIREMENTS.md`](../REQUIREMENTS.md). Execution order and rationale: [`index.md`](index.md).
+Part of the Claude Desktop Resource Monitor build. Full requirements: [`../requirements/REQUIREMENTS-v1.md`](../requirements/REQUIREMENTS-v1.md). Execution order and rationale: [`index.md`](index.md).
 
 ## Context
 
@@ -168,7 +168,7 @@ Each event: `{"id", "state", "metric", "value", "threshold", "message"}`, where 
   Each prints a stderr line and writes a `flag` record.
 - [ ] Committed.
 
-## Plan-level decisions (not specified in REQUIREMENTS.md)
+## Plan-level decisions (not specified in requirements/REQUIREMENTS-v1.md)
 
 - 10% clear hysteresis on state flags; the swap streak clears on the first flat poll.
 - Baselines update only when a window is full.

@@ -1,6 +1,6 @@
 # Plan 03: Process discovery, attribution and per-process metrics
 
-Part of the Claude Desktop Resource Monitor build. Full requirements: [`../REQUIREMENTS.md`](../REQUIREMENTS.md). Execution order and rationale: [`index.md`](index.md).
+Part of the Claude Desktop Resource Monitor build. Full requirements: [`../requirements/REQUIREMENTS-v1.md`](../requirements/REQUIREMENTS-v1.md). Execution order and rationale: [`index.md`](index.md).
 
 ## Context
 
@@ -157,7 +157,7 @@ Plan 06 computes rolling averages and flags from these.
 - [ ] `--trace-io` prompts for sudo before starting and lists top written files (e.g. under `vm_bundles/`) during Cowork activity. Without the flag, no sudo prompt ever appears.
 - [ ] `uv run pytest` passes. Committed.
 
-## Plan-level decisions (not specified in REQUIREMENTS.md)
+## Plan-level decisions (not specified in requirements/REQUIREMENTS-v1.md)
 
 - Claude.app is accepted in `/Applications` or `~/Applications`.
 - Processes that exist at session start only contribute writes made after the start; processes created later contribute all their writes.

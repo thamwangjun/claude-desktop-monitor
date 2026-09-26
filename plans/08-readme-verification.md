@@ -1,6 +1,6 @@
 # Plan 08: README and end-to-end verification
 
-Part of the Claude Desktop Resource Monitor build. Full requirements: [`../REQUIREMENTS.md`](../REQUIREMENTS.md). Execution order and rationale: [`index.md`](index.md).
+Part of the Claude Desktop Resource Monitor build. Full requirements: [`../requirements/REQUIREMENTS-v1.md`](../requirements/REQUIREMENTS-v1.md). Execution order and rationale: [`index.md`](index.md).
 
 ## Context
 
@@ -114,7 +114,7 @@ Also run `uv run pytest` (whole suite) and a fresh-clone install (`git clone …
 - [ ] `plans/08-verification-results.md` records a pass for V-1 to V-6, the fresh-clone check and pytest.
 - [ ] Committed.
 
-## Plan-level decisions (not specified in REQUIREMENTS.md)
+## Plan-level decisions (not specified in requirements/REQUIREMENTS-v1.md)
 
 - An "extended period" for V-4 = at least 1 hour.
 - Verification results are recorded in `plans/08-verification-results.md`.
