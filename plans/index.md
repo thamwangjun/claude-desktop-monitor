@@ -204,3 +204,76 @@ Strictly sequential. 10 and 11 both depend only on 09, but both edit `run()` (§
 | 10 | Done (0a96c6c) — no code deviations. Live-verified: V-9 with a real running Claude Desktop and user-driven CPU spikes (`--cpu-window 6 --cpu-threshold 7 --notify-cooldown 120`, idle Total CPU measured at avg 0.6%/max 2.4%) — banner + Glass sound + thumbnail on raise, `flag` record carried `details`, `notification` `sent`, clear on stop, a second spike within the 120s window logged `suppressed_cooldown` with no banner, and (a spike that landed exactly at the 120.0s boundary) resent. V-11 with `--no-notify`: `session_start.config.notify` was `false`, flags still raised/cleared normally, zero `notification` records written. |
 | 11 | Done (6a55e1f) — two real bugs found and fixed during live verification, both outside the plan's literal task list but squarely in its scope: (1) `TuiRenderer.render()` didn't tolerate a dead TTY (only `stop()` did) — a real SIGHUP (closed tmux pane) made `Live.update()` raise `OSError` mid-loop, which was caught by the generic exception handler and misclassified the clean SIGHUP shutdown as `reason: error` instead of `reason: signal, signal: SIGHUP`; fixed by catching `OSError` around `Live.update()`, same as the existing `stop()` handling. (2) The exit notification's fire-and-forget path used pync's own `Notifier.notify()`, whose internal `Popen` inherits the caller's process group; a real pty hangup (unlike `kill -TERM`, which doesn't touch a controlling terminal) kills a just-launched `terminal-notifier` before it can show anything. Fixed by having `_pync_backend` bypass pync's `execute()` for `wait=False` (fire-and-forget is the only caller) and launch `terminal-notifier` directly with `start_new_session=True`, using `pync.Notifier.bin_path` (a singleton instance attribute, not a class to instantiate — an intermediate attempt at this fix called `pync.Notifier()`, which raised `TypeError` and was silently swallowed by `fire_and_forget`'s error handling, so two live retries showed no banner for the wrong reason before this was caught). All planned tasks done as specified otherwise. Live-verified: V-10.1 (SIGTERM, headless, nohup'd) — banner, `notification` `dispatched`, `session_end` (`signal: SIGTERM`); V-10.2 (SIGHUP via tmux `kill-pane`) — banner, log complete, terminal undamaged, confirmed after both bug fixes; V-10.3 — `q` (`reason: quit`) and Ctrl-C/SIGINT (`signal: SIGINT`) both produced no banner. V-11 header: `notify: on` by default, `notify: off` with `--no-notify`. Forced-failure check (debug-patched backend, `--cpu-threshold 1 --cpu-window 6`): header showed `notify: on (failing: see log)` plus one yellow warning line after the first of several failed sends, later failures logged only. `uv run pytest` (171 tests) passing throughout. |
 | 12 | Done (c491817) — no code deviations; no defects found in plans 09–11 during live verification. README gained a Notifications section (what notifies/tiers/sounds, cooldown, unexpected-exit behaviour, setup/troubleshooting steps) plus updated install, CLI, and JSONL record-type text. All of V-7 to V-12 passed live against the reference machine (Claude Desktop running); results in `plans/12-verification-results.md`. Two live-check reruns needed during V-10 (SIGHUP): the user asked to trigger the tmux-pane-kill check twice to confirm it, both passed identically — not a defect. |
+
+---
+
+# v3: Homebrew distribution (plans 13–17)
+
+Requirements: [`../requirements/REQUIREMENTS-v3.md`](../requirements/REQUIREMENTS-v3.md), incremental on v1 and v2. v3 makes the monitor installable with `brew install thamwangjun/tap/claude-desktop-monitor`: the script becomes the package `claude_desktop_monitor`, logs default to `~/Library/Logs/claude-desktop-monitor/`, and a personal tap ships an arm64 macOS 26 bottle. The TUI and all monitoring behaviour are unchanged.
+
+## The plans
+
+| # | Plan | Delivers | Checkpoint (done when) |
+|---|---|---|---|
+| 13 | [Package conversion](13-package-conversion.md) | `src/claude_desktop_monitor/` (moved `monitor.py` and icon), `uv_build`, console script, `LICENSE` (GPL-3.0-only), uv 0.12.19, test imports, `dist/` ignored, docs' commands | V-13 suite, V-15 `uv build` contents, dev commands run |
+| 14 | [Runtime changes for 0.3.0](14-runtime-changes.md) | Default log `~/Library/Logs/claude-desktop-monitor/`, `session_start.versions.monitor`, version 0.3.0 | V-14 dev runs; tests don't touch the real log directory |
+| 15 | [README and release](15-readme-release.md) | README: Homebrew install first, developer setup, log location, license. **User** pushes and tags `v0.3.0` | Tag on GitHub; archive `sha256` recorded |
+| 16 | [Formula and tap CI](16-formula-tap.md) | Rust 1.98.1 via mise; `../homebrew-tap` with `brew tap-new` workflows (`macos-26`) and the formula (resources, PATH wrapper, `test do`). **User** pushes and opens the formula PR | V-19 local source build; `brew style`/`audit` clean; PR CI green with a bottle |
+| 17 | [v3 verification](17-v3-verification.md) | **User** publishes the bottle; install from the tap; results file | V-13 – V-19 recorded and passing |
+
+## Order and dependencies
+
+```
+13 Package ──> 14 Runtime ──> 15 README & tag ══> 16 Formula & CI ══> 17 Verification
+                                  (user tags)       (user pushes, PR)   (user publishes)
+```
+
+Strictly sequential. `══>` marks a user gate: the next plan cannot start until the user has pushed, tagged, opened a PR or published. The per-plan workflow, conventions and checkpointing rules from v1 (above) apply unchanged.
+
+## Why the work is split this way
+
+1. **One kind of change per plan.** 13 changes how the project is built and run, with no behaviour change, so git records `monitor.py` as a rename and keeps its history. 14 holds the only user-visible changes. 15 is documentation and the release. 16 lives in a different repository. Each commit is reviewable on its own.
+2. **Plans end at user gates.** Pushing, tagging, opening PRs and publishing are the user's (git rules). Each gate closes a plan, so no plan stays open across a user action.
+3. **The tag comes after everything it ships.** The formula downloads the tag's archive and GitHub shows the tag's README, so code (13, 14) and README (15) are final before `v0.3.0`.
+4. **Every plan ends runnable.** After 13 the dev commands work; after 14 the release behaviour is in place; after 15 the source is public; after 16 the formula builds in CI; after 17 users can install it.
+
+Considered and rejected: merging 13 and 14 (the rename would carry behaviour changes and show as a large edit); merging 15 into 14 (a plan ending at the release gate would also contain code); merging 16 and 17 (one plan open across two user actions).
+
+## Shared conventions added in v3
+
+- **Layout:** the application is one module, `src/claude_desktop_monitor/monitor.py` (§-sections unchanged), plus `__init__.py`, `__main__.py` and `assets/`. Tests import `from claude_desktop_monitor import monitor`; `conftest.py` is gone.
+- **Commands:** `uv run claude-desktop-monitor`, `python -m claude_desktop_monitor`, `mise run monitor`. `uv run monitor.py` no longer works.
+- **Logs:** default `~/Library/Logs/claude-desktop-monitor/` (the monitor's own directory; `~/Library/Logs/Claude/` stays read-only).
+- **Docs follow the code:** each plan updates `CLAUDE.md`, `PLAN_EXEC_INSTRUCTIONS.md` and README lines for its own change, so no command in them is ever broken between plans.
+- **Tap repository:** `../homebrew-tap`, commit messages per B-9 (Homebrew style plus the attribution lines). Formula changes reach `main` through PRs (bottles).
+- **Homebrew hygiene:** Homebrew's `rust` is never installed on the reference machine; developer mode is switched off after developer commands (`tap-new`, `style`, `audit`, `update-python-resources` switch it on).
+
+## Requirement traceability
+
+| Requirement IDs | Plan |
+|---|---|
+| E-1 (uv), E-8, E-9, E-10, E-12, E-13 (no dependency change), N-2, W-2 (layout, commands), §8.5, V-13, V-15 | 13 |
+| L-1, L-8, E-11, W-2 (log location), V-13 (no real log writes), V-14 | 14 |
+| W-1, E-11 (tag), B-8 (first release) | 15 |
+| E-1 / E-13 (Rust pin), W-1 (Rust note), W-2 (tap, Rust, developer mode), B-1 – B-7, B-9, V-19, V-16 (build) | 16 |
+| V-16 (publish), V-17, V-18, V-13 – V-19 (recorded) | 17 |
+
+## Plan-level decisions (v3), for review
+
+| Plan | Decision |
+|---|---|
+| 13 | Delete `conftest.py` (editable install); add `description` and `readme` metadata; no per-file license headers; keep `monitor.py`'s `__main__` block; README gets the mechanical command replacement now, its restructure in 15 |
+| 14 | `DEFAULT_LOG_DIR` constant in §1; `versions.monitor` is `"unknown"` without package metadata; the V-14 run leaves one real log in the new directory |
+| 15 | Annotated tag; the user adds the remote (SSH or HTTPS) as well as pushing; README describes the Homebrew install before it exists, proved by V-17 |
+| 16 | Templates from a scratch tap `thamwangjun/cdm-scratch` (`--no-git`), then untapped; workflows committed to `main`, formula via PR from `claude-desktop-monitor-0.3.0`; dev tap = local clone tapped by path; `desc` adjusted to `brew style`; V-19 uses the formula's resource versions; stop and ask if `update-python-resources` can't resolve the tag URL |
+| 17 | Publish via the generated workflow rather than local `brew pr-pull`; `--notify-test` under `env -i` with a minimal PATH to prove the wrapper; V-13 – V-15 and V-19 carried from their plans, suite rerun once |
+
+## Status (v3)
+
+| Plan | Status |
+|---|---|
+| 13 | Not started |
+| 14 | Not started |
+| 15 | Not started |
+| 16 | Not started |
+| 17 | Not started |
