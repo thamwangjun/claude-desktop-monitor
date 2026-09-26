@@ -1,6 +1,6 @@
 import pytest
 
-import monitor
+from claude_desktop_monitor import monitor
 
 
 def test_parse_size_plain_bytes():

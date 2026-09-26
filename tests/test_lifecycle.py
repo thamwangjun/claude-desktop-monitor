@@ -4,7 +4,7 @@ import signal
 
 import pytest
 
-import monitor
+from claude_desktop_monitor import monitor
 
 
 def make_run_args(tmp_path, **overrides):

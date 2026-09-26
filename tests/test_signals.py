@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-import monitor
+from claude_desktop_monitor import monitor
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

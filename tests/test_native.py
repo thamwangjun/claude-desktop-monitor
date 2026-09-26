@@ -4,7 +4,7 @@ import tempfile
 import psutil
 import pytest
 
-import monitor
+from claude_desktop_monitor import monitor
 
 CLAUDE_EXE_PATHS = (
     "/Applications/Claude.app/Contents/MacOS/Claude",

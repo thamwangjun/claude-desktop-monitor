@@ -1,4 +1,4 @@
-import monitor
+from claude_desktop_monitor import monitor
 
 APP_PREFIX = "/Applications/Claude.app/"
 MAIN_EXE = "/Applications/Claude.app/Contents/MacOS/Claude"

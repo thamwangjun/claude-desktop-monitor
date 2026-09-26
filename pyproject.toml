@@ -1,6 +1,10 @@
 [project]
 name = "claude-desktop-monitor"
 version = "0.1.0"
+description = "Watch Claude Desktop's resource usage over time: TUI, JSONL log, flags and macOS notifications"
+readme = "README.md"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
 requires-python = ">=3.14"
 dependencies = [
     "psutil",
@@ -9,8 +13,12 @@ dependencies = [
     "watchdog",
 ]
 
+[project.scripts]
+claude-desktop-monitor = "claude_desktop_monitor.monitor:main"
+
 [dependency-groups]
 dev = ["pytest"]
 
-[tool.uv]
-package = false
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13"]
+build-backend = "uv_build"

@@ -2,7 +2,7 @@ import argparse
 
 from rich.console import Console
 
-import monitor
+from claude_desktop_monitor import monitor
 
 
 def make_args(**overrides):

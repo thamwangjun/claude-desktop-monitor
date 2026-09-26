@@ -1,6 +1,6 @@
 import argparse
 
-import monitor
+from claude_desktop_monitor import monitor
 
 
 def make_args(**overrides):

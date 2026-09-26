@@ -1,6 +1,6 @@
 [tools]
 python = "3.14.7"
-uv = "0.12.18"
+uv = "0.12.19"
 
 [tasks.monitor]
-run = "uv run monitor.py"
+run = "uv run claude-desktop-monitor"

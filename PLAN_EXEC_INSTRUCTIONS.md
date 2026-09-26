@@ -4,7 +4,7 @@ Guide for implementing this project one plan per session. Each session is given 
 
 ## 1. What this project is
 
-`monitor.py` is a macOS terminal tool that monitors **Claude Desktop's** resource usage over time. It focuses on the **Cowork** feature's local Linux VM, which runs on Apple's Virtualization.framework.
+`src/claude_desktop_monitor/monitor.py` is a macOS terminal tool that monitors **Claude Desktop's** resource usage over time. It focuses on the **Cowork** feature's local Linux VM, which runs on Apple's Virtualization.framework.
 
 Public issue reports describe gradual degradation:
 - the VM disk image growing without bound;
@@ -16,7 +16,7 @@ The tool samples processes, disk footprint, swap and macOS diagnostic reports ev
 
 **v2** (plans 09–12) adds **macOS notifications**: when a flag is raised or an event fires, and when the monitor itself exits unexpectedly. They are sent via pync / terminal-notifier, with the Claude logo as a thumbnail.
 
-**v3** (plans 13–17) distributes it through **Homebrew**: the script becomes the package `claude_desktop_monitor` (`src/` layout, `uv_build`), logs default to `~/Library/Logs/claude-desktop-monitor/`, and a personal tap (`thamwangjun/homebrew-tap`, cloned at `../homebrew-tap`) ships an arm64 macOS 26 bottle. Monitoring behaviour is unchanged. Until plans 13, 14 and 16 are done, §4–§6 below describe the pre-v3 code; each of those plans updates them for its own change.
+**v3** (plans 13–17) distributes it through **Homebrew**: the script becomes the package `claude_desktop_monitor` (`src/` layout, `uv_build`; done in Plan 13), logs default to `~/Library/Logs/claude-desktop-monitor/` (Plan 14, not yet done), and a personal tap (`thamwangjun/homebrew-tap`, cloned at `../homebrew-tap`) ships an arm64 macOS 26 bottle (Plans 16–17). Monitoring behaviour is unchanged. Until plans 14 and 16 are done, §4–§6 below describe the pre-14/pre-16 code; each of those plans updates them for its own change.
 
 It is observability only (see §7 Hard rules).
 
@@ -35,7 +35,7 @@ If a plan and the requirements conflict, the requirements win (the later version
 Plans:
 - **v1:** `01-scaffold`, `02-native-layer`, `03-processes`, `04-disk-footprint`, `05-system-signals`, `06-analysis-alerts`, `07-tui`, `08-readme-verification`. Default order is 01 → 08. Plans 02, 04 and 05 each depend only on 01. All are done.
 - **v2:** `09-notifier`, `10-notification-policy`, `11-lifecycle-ui`, `12-readme-verification`. **Strictly sequential**, 09 → 12: 10 and 11 both edit `run()` and the shutdown path. All are done.
-- **v3:** `13-package-conversion`, `14-runtime-changes`, `15-readme-release`, `16-formula-tap`, `17-v3-verification`. **Strictly sequential**, 13 → 17. Plans 15, 16 and 17 each end at a **user gate** (tag, PR, publish); the next plan can't start before it.
+- **v3:** `13-package-conversion`, `14-runtime-changes`, `15-readme-release`, `16-formula-tap`, `17-v3-verification`. **Strictly sequential**, 13 → 17. Plans 15, 16 and 17 each end at a **user gate** (tag, PR, publish); the next plan can't start before it. 13 is done; 14–17 are not started.
 
 ## 3. How to execute a plan (every session)
 
@@ -62,8 +62,8 @@ Checks that need the user are listed in §9. Ask the user to do those; don't wor
 | Machine | Apple M5 (Mac17,4), 10 CPUs, 32 GB RAM, macOS 26.7 (25G229) |
 | User shell | fish. Commands in the Bash tool run fine; when giving the user commands to type, keep them POSIX-simple or fish-compatible. |
 | Tool manager | mise 2026.9.11 (globally: Python 3.14.6, uv 0.11.28) |
-| Project pins | `mise.toml`: **Python 3.14.7**, **uv 0.12.18**. Run `mise install` in the repo if missing. |
-| Python env | uv project: `pyproject.toml` + committed `uv.lock`, `uv sync`, run with `uv run …`. Never use `pip install` into system or Homebrew Python (PEP 668). |
+| Project pins | `mise.toml`: **Python 3.14.7**, **uv 0.12.19**. Run `mise install` in the repo if missing. |
+| Python env | uv project, `src/` layout: `pyproject.toml` (build backend `uv_build`) + committed `uv.lock`, `uv sync` (installs the package editable), run with `uv run claude-desktop-monitor` or `python -m claude_desktop_monitor`. Never use `pip install` into system or Homebrew Python (PEP 668). |
 | Runtime deps | `psutil`, `rich`, `watchdog`, and from Plan 09 **`pync`** (which pulls in `python-dateutil`; pync 2.0.3 is an sdist, which `uv sync` builds). Dev only: `pytest` (`[dependency-groups] dev`). Nothing else without asking. |
 | Claude Desktop | `/Applications/Claude.app`, version 2.9939.2, bundle ID `com.anthropic.claudefordesktop`. Cowork VM downloaded. |
 | Docker Desktop | Installed and often running. Runs its **own** `com.apple.Virtualization.VirtualMachine` process, which must never be counted as Claude's. |
@@ -75,14 +75,14 @@ Commands:
 ```
 mise install                 # tool versions from mise.toml
 uv sync                      # create/refresh .venv from uv.lock
-uv run monitor.py            # TUI
-uv run monitor.py --no-tui   # headless
+uv run claude-desktop-monitor            # TUI
+uv run claude-desktop-monitor --no-tui   # headless
 uv run pytest                # full test suite
 ```
 
 ## 5. Code conventions (fixed by Plan 01)
 
-- **Single application file** `monitor.py`, importable without side effects (`if __name__ == "__main__": main()`). Tests in `tests/`, fixtures in `tests/fixtures/`.
+- **Single application module** `src/claude_desktop_monitor/monitor.py`, importable without side effects (`if __name__ == "__main__": main()`). Tests in `tests/` (import `from claude_desktop_monitor import monitor`; the package installs editable via `uv sync`, no `conftest.py`), fixtures in `tests/fixtures/`.
 - **Sections**, marked by banners `# ── §N name ──`:
 
   | § | Section | Plan |
@@ -232,7 +232,7 @@ Ask the user to do these at the right moment, then continue from their report or
 - Quitting and relaunching Claude Desktop (Plan 03).
 - Starting or stopping Docker Desktop (Plans 03, 08).
 - Running a Cowork task in Claude Desktop, e.g. to make `sessiondata.img` or writes grow (Plans 03, 06, 08).
-- Anything with `sudo`, e.g. `--trace-io` (Plan 03). Suggest they run it themselves, e.g. `! uv run monitor.py --trace-io`.
+- Anything with `sudo`, e.g. `--trace-io` (Plan 03). Suggest they run it themselves, e.g. `! uv run claude-desktop-monitor --trace-io`.
 - Interactive TUI checks: key presses, visual layout, terminal restoration (Plan 07). Give an exact checklist.
 - Checking values against Activity Monitor (Plan 03).
 - Long headless runs (Plan 08, V-4 ≥ 1 h). You can start them in the background with `run_in_background`; tell the user it is running.

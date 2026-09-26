@@ -19,9 +19,9 @@ Tested on Apple M5 (Mac17,4), macOS 26.7 (25G229), Claude Desktop 2.9939.2.
 ```
 mise install                 # Python 3.14.7, uv 0.12.18 (pinned in mise.toml)
 uv sync                      # create/refresh .venv from uv.lock
-uv run monitor.py            # live TUI
-uv run monitor.py --no-tui   # headless, e.g. under nohup or tmux for overnight runs
-# or: mise run monitor       # alias for `uv run monitor.py`
+uv run claude-desktop-monitor            # live TUI
+uv run claude-desktop-monitor --no-tui   # headless, e.g. under nohup or tmux for overnight runs
+# or: mise run monitor       # alias for `uv run claude-desktop-monitor`
 ```
 
 Runtime dependencies are `psutil`, `rich`, `watchdog` and `pync` (for notifications; `uv sync` builds it from source — it ships no wheel); everything else is the standard library. `psutil.Process.io_counters()` isn't available on macOS, so process I/O comes from a `ctypes` call instead (`proc_pid_rusage`) — see [Known limitations](#known-limitations).
@@ -88,7 +88,7 @@ Special values: **`n/a`** = the metric couldn't be read (e.g. a permission error
 
 An absolute ">5 GB VM bundle" alert was considered and dropped: a fresh Cowork bundle is already ~11 GB, so an absolute threshold is meaningless. Absolute size is still shown.
 
-CLI flags (`uv run monitor.py --help`):
+CLI flags (`uv run claude-desktop-monitor --help`):
 
 | Flag | Default | Purpose |
 |---|---|---|
@@ -141,7 +141,7 @@ Only the **raised** and **event** transitions notify; a flag **clearing** never 
 
 **Setup and troubleshooting** — if you never see a banner:
 
-1. Run `uv run monitor.py --notify-test` once. The *first* notification any app sends is what makes it appear in **System Settings → Notifications** at all; find **terminal-notifier** there and make sure it's allowed, with the Banners or Alerts style (not "None").
+1. Run `uv run claude-desktop-monitor --notify-test` once. The *first* notification any app sends is what makes it appear in **System Settings → Notifications** at all; find **terminal-notifier** there and make sure it's allowed, with the Banners or Alerts style (not "None").
 2. Focus modes and Do Not Disturb suppress banners **silently** — macOS reports no error, and the monitor can't detect this. If `--notify-test` reports both sends as `sent` but nothing appeared, check Focus/Do Not Disturb.
 3. On Apple Silicon, install Homebrew's `terminal-notifier` (`brew install terminal-notifier`): pync prefers whatever's on `PATH`, and its own bundled copy is Intel-only (2.0.0, runs under Rosetta, and macOS shows a one-time "uses Intel components" warning). Homebrew's 3.1.0 is native arm64. Without `/opt/homebrew/bin` on `PATH`, the bundled copy is used instead.
 4. `terminal-notifier -diagnose` (Homebrew 3.1.0) reports why notifications may not be appearing.
@@ -155,7 +155,7 @@ A failed send (the notifier couldn't launch, or exited non-zero) is logged every
 - **`~/Library/Logs/Claude/`** (`cowork_vm_swift.log`, `cowork_vm_node.log`, `coworkd.log`, `vzgvisor.log`, `main.log`) — not parsed by the monitor (their format is undocumented and version-dependent), but worth grepping by hand:
   - `guest_vsock_connect started` with no matching `completed` line means the VM is stalled at boot ([#87794](https://github.com/anthropics/claude-code/issues/87794)).
   - A download message repeating every few seconds means a re-download loop (reported separately as #51913, a re-download loop distinct from the stalled-download `*.partial` flag above; not one of the citations verified for this README, so no link here).
-- **`--trace-io`** (needs `sudo`): shows which files are actually being written. Run it yourself so you can type your password: `sudo -v` first, then `uv run monitor.py --trace-io`.
+- **`--trace-io`** (needs `sudo`): shows which files are actually being written. Run it yourself so you can type your password: `sudo -v` first, then `uv run claude-desktop-monitor --trace-io`.
 
 ## Reviewing a session log
 

@@ -1,7 +1,7 @@
 import os
 import time
 
-import monitor
+from claude_desktop_monitor import monitor
 
 
 def _poll_until(predicate, timeout=5.0, interval=0.1):

@@ -4,27 +4,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`monitor.py`: a macOS-only terminal tool that watches Claude Desktop's resource usage over time (especially the Cowork Linux VM), logs JSONL, raises flags against fixed rules, sends macOS notifications, and shows a `rich` TUI or runs headless. **Observability only.**
+One module, `src/claude_desktop_monitor/monitor.py`: a macOS-only terminal tool that watches Claude Desktop's resource usage over time (especially the Cowork Linux VM), logs JSONL, raises flags against fixed rules, sends macOS notifications, and shows a `rich` TUI or runs headless. **Observability only.**
 
-`PLAN_EXEC_INSTRUCTIONS.md` is the full working guide (verified technical facts, hard rules, git rules, user-only checks). Read it before non-trivial changes. Docs by authority: `requirements/REQUIREMENTS-v1.md` → `REQUIREMENTS-v2.md` → `REQUIREMENTS-v3.md` (each later version wins where it amends an earlier one) → `plans/index.md` (status table, conventions) → `plans/NN-*.md`. If a plan conflicts with the requirements, stop and ask the user. v1 (plans 01–08) and v2 (09–12) are done; v3 (13–17, Homebrew distribution) is planned, not started. The commands and layout below are pre-v3 until plans 13 and 14 update them.
+`PLAN_EXEC_INSTRUCTIONS.md` is the full working guide (verified technical facts, hard rules, git rules, user-only checks). Read it before non-trivial changes. Docs by authority: `requirements/REQUIREMENTS-v1.md` → `REQUIREMENTS-v2.md` → `REQUIREMENTS-v3.md` (each later version wins where it amends an earlier one) → `plans/index.md` (status table, conventions) → `plans/NN-*.md`. If a plan conflicts with the requirements, stop and ask the user. v1 (plans 01–08) and v2 (09–12) are done; v3 (13–17, Homebrew distribution) is in progress: 13 (package conversion) is done, 14–17 are not started. The log location, `versions.monitor` and the 0.3.0 version below are pre-14 until that plan lands.
 
 ## Commands
 
 ```
-mise install                          # Python 3.14.7, uv 0.12.18 (mise.toml)
+mise install                          # Python 3.14.7, uv 0.12.19 (mise.toml)
 uv sync                               # .venv from uv.lock; never pip install
-uv run monitor.py                     # TUI
-uv run monitor.py --no-tui            # headless (also automatic when stdout isn't a TTY)
-uv run monitor.py --notify-test       # sends 2 REAL banners; only when the user agrees
+uv run claude-desktop-monitor                     # TUI
+uv run claude-desktop-monitor --no-tui            # headless (also automatic when stdout isn't a TTY)
+uv run claude-desktop-monitor --notify-test       # sends 2 REAL banners; only when the user agrees
+python -m claude_desktop_monitor --no-tui         # equivalent, without the console script
 uv run pytest                         # full suite (always run the whole suite before committing)
 uv run pytest tests/test_analysis.py::test_name   # single test
 ```
 
-`conftest.py` puts the repo root on `sys.path` so tests can `import monitor` (the project isn't packaged: `package = false`). `tests/test_native.py` makes real ctypes calls against live processes.
+Tests import `from claude_desktop_monitor import monitor` (the package installs editable via `uv sync`, so no `sys.path` hack or `conftest.py` is needed). `tests/test_native.py` makes real ctypes calls against live processes.
 
 ## Architecture
 
-Single file `monitor.py`, importable without side effects, split into banner-marked sections `# ── §N name ──`:
+One module, `src/claude_desktop_monitor/monitor.py`, importable without side effects, split into banner-marked sections `# ── §N name ──`:
 
 | § | Section |
 |---|---|

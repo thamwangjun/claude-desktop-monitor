@@ -6,8 +6,8 @@ import types
 
 import pytest
 
-import monitor
-from monitor import Notification, NotificationSender
+from claude_desktop_monitor import monitor
+from claude_desktop_monitor.monitor import Notification, NotificationSender
 
 
 def _n(flag_id="cpu:renderer", tier="warning", subtitle="High CPU — renderer", body="line 1\nline 2"):
