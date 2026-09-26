@@ -16,7 +16,9 @@ The tool samples processes, disk footprint, swap and macOS diagnostic reports ev
 
 **v2** (plans 09–12) adds **macOS notifications**: when a flag is raised or an event fires, and when the monitor itself exits unexpectedly. They are sent via pync / terminal-notifier, with the Claude logo as a thumbnail.
 
-**v3** (plans 13–17) distributes it through **Homebrew**: the script becomes the package `claude_desktop_monitor` (`src/` layout, `uv_build`; done in Plan 13), logs default to `~/Library/Logs/claude-desktop-monitor/` (done in Plan 14), and a personal tap (`thamwangjun/homebrew-tap`, cloned at `../homebrew-tap`) ships an arm64 macOS 26 bottle. The formula and tap CI are done (Plan 16: `Formula/claude-desktop-monitor.rb` on branch `claude-desktop-monitor-0.3.0`, PR #1, CI green with a bottle built from source); only publishing that bottle and installing from the tap (Plan 17) remain. Monitoring behaviour is unchanged.
+**v3** (plans 13–17) distributes it through **Homebrew**: the script becomes the package `claude_desktop_monitor` (`src/` layout, `uv_build`; done in Plan 13), logs default to `~/Library/Logs/claude-desktop-monitor/` (done in Plan 14), and a personal tap (`thamwangjun/homebrew-tap`, cloned at `../homebrew-tap`) ships an arm64 macOS 26 bottle. All of v3 is done: 0.3.0 is published with its bottle (Plan 17). Monitoring behaviour is unchanged.
+
+**v3.1** (plans 18–19) raises the default `--cpu-threshold` from 30 to 90 (% of one core, unchanged unit; clears below 81%) and ships it as 0.3.1 through the tap. At the new default the #22543 idle climb is seen via current vs. baseline rather than a flag (REQUIREMENTS-v3.1 §2).
 
 It is observability only (see §7 Hard rules).
 
@@ -27,15 +29,17 @@ It is observability only (see §7 Hard rules).
 | `requirements/REQUIREMENTS-v1.md` | Authoritative spec. Requirement IDs (P-, G-, D-, C-, M-, I-, T-, U-, K-, H-, L-, X-, E-, V-), alert rules (§5), CLI flags (§6), approved citations (§11). |
 | `requirements/REQUIREMENTS-v2.md` | Incremental spec for notifications (plans 09–12): N-1 – N-24, L-7, L-8, E-3 (amended), E-7, V-7 – V-12, notification wording (§5), CLI additions (§6). It amends v1: **where v2 changes something, v2 wins; everything else is still v1.** |
 | `requirements/REQUIREMENTS-v3.md` | Incremental spec for Homebrew distribution (plans 13–17): E-8 – E-13, L-1 (amended), L-8, N-2 (amended), B-1 – B-9, W-1, W-2, V-13 – V-19, decision log (§10). It amends v1 and v2: **where v3 changes something, v3 wins.** |
+| `requirements/REQUIREMENTS-v3.1.md` | Incremental spec for the CPU default and 0.3.1 release (plans 18–19): C-3 (amended), E-11 (0.3.1), W-3, W-4, B-10, V-20 – V-23, decision log (§11). **Where v3.1 changes something, v3.1 wins.** |
 | `plans/index.md` | Execution order, dependencies, per-plan workflow, shared conventions, traceability, plan-level decisions, **status table**. |
 | `plans/NN-*.md` | The plan to execute: context, requirements covered, design, tasks, verification checklist, plan-level decisions, out of scope. |
 
-If a plan and the requirements conflict, the requirements win (the later version wins for anything it amends: v3 over v2 over v1). Stop and raise the conflict with the user; don't pick one silently.
+If a plan and the requirements conflict, the requirements win (the later version wins for anything it amends: v3.1 over v3 over v2 over v1). Stop and raise the conflict with the user; don't pick one silently.
 
 Plans:
 - **v1:** `01-scaffold`, `02-native-layer`, `03-processes`, `04-disk-footprint`, `05-system-signals`, `06-analysis-alerts`, `07-tui`, `08-readme-verification`. Default order is 01 → 08. Plans 02, 04 and 05 each depend only on 01. All are done.
 - **v2:** `09-notifier`, `10-notification-policy`, `11-lifecycle-ui`, `12-readme-verification`. **Strictly sequential**, 09 → 12: 10 and 11 both edit `run()` and the shutdown path. All are done.
-- **v3:** `13-package-conversion`, `14-runtime-changes`, `15-readme-release`, `16-formula-tap`, `17-v3-verification`. **Strictly sequential**, 13 → 17. Plans 15, 16 and 17 each end at a **user gate** (tag, PR, publish); the next plan can't start before it. 13, 14, 15 and 16 are done; 17 is not started.
+- **v3:** `13-package-conversion`, `14-runtime-changes`, `15-readme-release`, `16-formula-tap`, `17-v3-verification`. **Strictly sequential**, 13 → 17. Plans 15, 16 and 17 each end at a **user gate** (tag, PR, publish); the next plan can't start before it. All are done.
+- **v3.1:** `18-cpu-default`, `19-release-0.3.1`. **Strictly sequential**. 18 ends at the tag gate (`v0.3.1`), 19 at the publish gate. Neither is started.
 
 ## 3. How to execute a plan (every session)
 
@@ -230,6 +234,7 @@ Default `--log` destination, with no `--log` given, is `~/Library/Logs/claude-de
 - **v3 exceptions and additions:**
   - Pushing, adding remotes, tagging, opening PRs, changing GitHub repository settings and publishing bottles are **the user's** (plans 15–17). Give exact commands and wait.
   - The tap repository `../homebrew-tap` is separate. Plan 16 creates branch `claude-desktop-monitor-0.3.0` there (listed in the plan, so allowed). Tap commits don't use `plan NN:`; they follow REQUIREMENTS-v3 B-9: Homebrew-style subjects (`claude-desktop-monitor 0.3.0 (new formula)`, `workflows: …`) and the same attribution lines.
+- **v3.1:** the same rules. The user pushes `main` and the `v0.3.1` tag (Plan 18), and pushes the tap branch, opens the PR and publishes (Plan 19). Plan 19 creates tap branch `claude-desktop-monitor-0.3.1` from `origin/main`; its commit subject is `claude-desktop-monitor 0.3.1`.
 
 ## 9. Checks that need the user
 
@@ -253,6 +258,10 @@ Ask the user to do these at the right moment, then continue from their report or
   - Plan 16: set the tap repository's GitHub settings the workflows need, push the tap's `main` and the formula branch, open the PR.
   - Plan 17: publish the bottle (generated "brew pr-pull" workflow); agree to the `--notify-test` run (V-18).
 
+- **v3.1 user steps** (plans 18–19):
+  - Plan 18: push `main`, create and push the annotated tag `v0.3.1`.
+  - Plan 19: push the tap branch `claude-desktop-monitor-0.3.1` and open the PR; publish the bottle (generated "brew pr-pull" workflow).
+
 Time-sensitive (v1 only): the Claude `.diag` report above is inside the 24 h startup window only until **2026-09-26 21:34 +08:00**. After that, verify V-5 with the Plan 05 fixtures. This does not affect v2.
 
 ## 10. Working with the user
@@ -261,4 +270,4 @@ Time-sensitive (v1 only): the Claude `.diag` report above is inside the 24 h sta
 - **Ambiguity:** don't guess. Ask with the AskUserQuestion tool, **one question per call**, with your recommendation first, labelled "(Recommended)". If they answer with free text, e.g. "research this" or "use X", do that and re-ask the same item before moving on.
 - Choices between alternatives: present a short comparison table (pros/cons, concrete numbers) and let the user decide.
 - Report outcomes faithfully. Failures are shown with their actual output; skipped steps are stated as skipped.
-- Record any new requirement-level decision in the requirements file for the plan's version (`requirements/REQUIREMENTS-v1.md` for plans 01–08, `requirements/REQUIREMENTS-v2.md` for plans 09–12, `requirements/REQUIREMENTS-v3.md` for plans 13–17), and any plan-level one in the plan or status note, in the same commit.
+- Record any new requirement-level decision in the requirements file for the plan's version (`requirements/REQUIREMENTS-v1.md` for plans 01–08, `requirements/REQUIREMENTS-v2.md` for plans 09–12, `requirements/REQUIREMENTS-v3.md` for plans 13–17, `requirements/REQUIREMENTS-v3.1.md` for plans 18–19), and any plan-level one in the plan or status note, in the same commit.
