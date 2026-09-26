@@ -24,7 +24,7 @@ uv run monitor.py --no-tui   # headless, e.g. under nohup or tmux for overnight 
 # or: mise run monitor       # alias for `uv run monitor.py`
 ```
 
-Runtime dependencies are `psutil`, `rich` and `watchdog`; everything else is the standard library. `psutil.Process.io_counters()` isn't available on macOS, so process I/O comes from a `ctypes` call instead (`proc_pid_rusage`) — see [Known limitations](#known-limitations).
+Runtime dependencies are `psutil`, `rich`, `watchdog` and `pync` (for notifications; `uv sync` builds it from source — it ships no wheel); everything else is the standard library. `psutil.Process.io_counters()` isn't available on macOS, so process I/O comes from a `ctypes` call instead (`proc_pid_rusage`) — see [Known limitations](#known-limitations).
 
 No `sudo` is used unless you pass `--trace-io` (see below).
 
@@ -106,10 +106,48 @@ CLI flags (`uv run monitor.py --help`):
 | `--include-cli` | off | Also track the Claude Code CLI as a separate group |
 | `--trace-io` | off | Elevated `sudo fs_usage` file-level write tracing |
 | `--support-dir SUPPORT_DIR` | `~/Library/Application Support/Claude` | Override the Claude support directory (testing) |
+| `--no-notify` | off (notifications on) | Disable macOS notifications entirely, including the unexpected-exit one |
+| `--notify-cooldown SEC` | 300 | Per-flag notification cooldown (see [Notifications](#notifications)) |
+| `--notify-test` | off | Send one sample warning and one sample critical notification, report the result, exit |
 
 Byte-valued flags accept decimal (`KB`/`MB`/`GB`) or binary (`KiB`/`MiB`/`GiB`) suffixes, e.g. `--write-threshold 512KiB`.
 
 Headless mode (`--no-tui`, or automatically when stdout isn't a TTY) prints one line per flag transition to stderr and writes nothing else to the terminal — meant for `nohup`/`tmux`.
+
+## Notifications
+
+When a flag is raised (or a one-off event fires), the monitor sends a macOS banner notification via [`pync`](https://github.com/setem/pync), which launches `terminal-notifier` as a subprocess — see [Known limitations](#known-limitations) for why this indirection exists. Notifications are on by default in both TUI and headless mode.
+
+**What notifies, and how it sounds:**
+
+| Flag type | Tier | Sound |
+|---|---|---|
+| `cpu:<role>` | warning | Glass |
+| `mem:<role>` | warning | Glass |
+| `wr:<role>` | warning | Glass |
+| `swap:streak` | warning | Glass |
+| `budget:2g` / `budget:8g` | critical | Basso |
+| `bundle:growth` / `bundle:rate` / `bundle:zst` | critical | Basso |
+| `partial:<path>` | critical | Basso |
+| `diag:<file>` | critical | Basso |
+| monitor exits unexpectedly (`monitor:exit`) | critical | Basso |
+| `attr:vm?` | — | never notifies (stays in the TUI/log only) |
+
+Only the **raised** and **event** transitions notify; a flag **clearing** never notifies. Startup-listed `.diag` reports (found when the monitor starts, not new ones) don't notify either.
+
+**Noise control**: each flag fires at most one notification, then waits out a per-flag cooldown (`--notify-cooldown`, default 300 s, `0` to disable) before that same flag ID can notify again. Flags raised on the same poll aren't merged, and a per-role flag isn't suppressed just because the matching `total` flag also fired. A notification suppressed by cooldown is still recorded in the log (`notification` record, `status: suppressed_cooldown`) and still shown in the TUI/stderr as normal — only the banner is skipped. `diag:<file>` IDs are unique per report file, so they're effectively never subject to cooldown.
+
+**Unexpected exit**: an unhandled exception, **SIGTERM** or **SIGHUP** (e.g. `kill`, closing the terminal or a tmux pane) sends one critical notification saying the monitor stopped and that alerts have stopped, then shuts down cleanly. A clean **`q`** or **Ctrl-C** (SIGINT) does **not** notify — that's an intentional stop, not a failure. **SIGKILL and a power loss can't be caught by any process**, so they can't notify either; if the monitor simply disappears with no exit notification and no `session_end` record, that's the likely cause. Running under `nohup` makes the process ignore SIGHUP (the shell sets this up, not the monitor), so a `nohup`'d headless run keeps going after its terminal closes, as expected.
+
+**Setup and troubleshooting** — if you never see a banner:
+
+1. Run `uv run monitor.py --notify-test` once. The *first* notification any app sends is what makes it appear in **System Settings → Notifications** at all; find **terminal-notifier** there and make sure it's allowed, with the Banners or Alerts style (not "None").
+2. Focus modes and Do Not Disturb suppress banners **silently** — macOS reports no error, and the monitor can't detect this. If `--notify-test` reports both sends as `sent` but nothing appeared, check Focus/Do Not Disturb.
+3. On Apple Silicon, install Homebrew's `terminal-notifier` (`brew install terminal-notifier`): pync prefers whatever's on `PATH`, and its own bundled copy is Intel-only (2.0.0, runs under Rosetta, and macOS shows a one-time "uses Intel components" warning). Homebrew's 3.1.0 is native arm64. Without `/opt/homebrew/bin` on `PATH`, the bundled copy is used instead.
+4. `terminal-notifier -diagnose` (Homebrew 3.1.0) reports why notifications may not be appearing.
+5. The banner's main icon is terminal-notifier's own — macOS only takes the main notification icon from the sending app's own signed bundle, and the project's Python interpreter isn't one (see [Known limitations](#known-limitations)). The Claude logo appears instead as a *thumbnail* image alongside it (`contentImage`, from the committed `assets/claude-icon.png`).
+
+A failed send (the notifier couldn't launch, or exited non-zero) is logged every time but only shown once per session, as a header warning in the TUI (`notify: on (failing: see log)`) or one stderr line headless — later failures are logged only, so the run isn't spammed. If pync itself can't be loaded at startup, notifications are unavailable for the whole session (`notify:init` logged, TUI header `notify: off (unavailable)`), but the monitor still runs.
 
 ## When a flag fires, look here next
 
@@ -121,7 +159,7 @@ Headless mode (`--no-tui`, or automatically when stdout isn't a TTY) prints one 
 
 ## Reviewing a session log
 
-Each line in the JSONL log is one record with a `type` field: `session_start` (config, dependency and host versions), `sample` (one poll: `claude`, `processes`, `roles`, `total`, optionally `cli` and `trace_io`, `paths`, `bundle`, `swap`, `diag`, `derived`, `active_flags`), `flag` (`raised`/`cleared`/`event`, with `id`, `value`, `threshold`, `message`), `marker` (a `label`), `diag_report` (one parsed `.diag` file), and `session_end` (`reason`: `quit`, `error`, or the SIGTERM handler). Every record has `ts` (ISO-8601 with timezone) and `elapsed` (monotonic seconds since session start).
+Each line in the JSONL log is one record with a `type` field: `session_start` (config — including `notify`/`notify_cooldown` — dependency and host versions), `sample` (one poll: `claude`, `processes`, `roles`, `total`, optionally `cli` and `trace_io`, `paths`, `bundle`, `swap`, `diag`, `derived`, `active_flags`), `flag` (`raised`/`cleared`/`event`, with `id`, `value`, `threshold`, `message`, and optionally `details` — the structured values a notification's wording was built from), `marker` (a `label`), `diag_report` (one parsed `.diag` file), `notification` (a sent, suppressed or failed notification: `id`, `tier`, `title`, `subtitle`, `body`, `status` = `sent`/`suppressed_cooldown`/`failed`/`dispatched`), and `session_end` (`reason`: `quit`, `error`, or `signal`, plus `signal` naming which one — e.g. `SIGTERM`, `SIGHUP`, `SIGINT` — when `reason` is `signal`). Every record has `ts` (ISO-8601 with timezone) and `elapsed` (monotonic seconds since session start).
 
 Flags timeline:
 
