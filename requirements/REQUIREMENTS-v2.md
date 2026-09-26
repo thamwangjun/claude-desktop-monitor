@@ -47,6 +47,8 @@ Other facts:
 - macOS reports no error when notifications are disabled for the sender or suppressed by a Focus mode; only a failed launch or a non-zero exit status is detectable.
 - terminal-notifier treats a message starting with `-` or `[` specially; such text must be escaped.
 - pync 2.0.3 installs from sdist (no wheel) and works on Python 3.14.7.
+- pync's vendored `terminal-notifier.app` 2.0.0 is **x86_64 only**: on Apple Silicon it runs under Rosetta 2, and macOS 26 shows a one-time warning that the app uses Intel components. Rosetta is expected to become limited after macOS 27, after which the vendored copy would stop launching (a detectable failure, N-22). Found during Plan 09 (V-8), 2026-09-26.
+- pync prefers a `terminal-notifier` on PATH over its vendored copy. **Homebrew `terminal-notifier` 3.1.0** (`brew install terminal-notifier`) is native **arm64**, has the same bundle ID (`fr.julienxx.oss.terminal-notifier`), requires macOS 26+, and supports every option used here (`-message`, `-title`, `-subtitle`, `-sound`, `-contentImage`). It removes `-appIcon` and `-sender` (consistent with the icon tests above), still requires escaping a leading `[`, and adds `-diagnose` (reports why notifications may not appear). It is what the reference machine uses from Plan 09 on.
 
 ## 4. Functional requirements
 
@@ -54,7 +56,7 @@ Other facts:
 
 | ID | Requirement |
 |---|---|
-| N-1 | Notifications are sent via **pync** (bundled terminal-notifier). No fallback mechanism. |
+| N-1 | Notifications are sent via **pync**, which launches a `terminal-notifier` on PATH if present (recommended on Apple Silicon: Homebrew 3.1.0, native arm64), otherwise its bundled copy (2.0.0, Intel-only, needs Rosetta; see §3). No other fallback mechanism. Amended 2026-09-26 (Plan 09). |
 | N-2 | Every notification attaches **Claude's app icon as `contentImage`** (thumbnail), from a **committed PNG** `assets/claude-icon.png` (256 px, generated once from `/Applications/Claude.app/Contents/Resources/electron.icns` with `sips`). No runtime dependency on Claude.app. If the file is missing, the notification is sent without an image. |
 | N-3 | Sending **never blocks the poll loop**. A slow or hung notifier must not delay sampling. |
 | N-4 | Title, subtitle and body text are escaped per terminal-notifier's rules (leading `-` / `[`), and truncated to fit a banner: subtitle ≤ 40 chars, body ≤ 2 lines of ≤ 60 chars; long paths shortened in the middle. |
@@ -157,6 +159,7 @@ Values in `<>` are filled in at send time. The hint wording was accepted in O-1 
 4. `README.md` additions:
    - notification behaviour: which flags notify, tiers and sounds, cooldown, `--no-notify`;
    - first-run permission: terminal-notifier appears in System Settings → Notifications; Focus modes suppress banners silently; use `--notify-test` to check;
+   - Apple Silicon: install Homebrew `terminal-notifier` (native arm64) so pync's Intel-only bundled copy and its Rosetta warning are not used; `terminal-notifier -diagnose` for troubleshooting;
    - why the main icon is terminal-notifier's (app-bundle requirement, §3) and the Claude logo is a thumbnail;
    - the SIGKILL / power-loss limit of N-14.
 5. This `requirements/REQUIREMENTS-v2.md`.
@@ -202,7 +205,7 @@ Unit tests use a **mocked sender** (no real notifications). Live checks are done
 | U-4 TUI header | + `notify: on/off` (N-20) |
 | H-1 headless | + one-time notification-failure warning on stderr (N-22) |
 | Signal handling (K-1) | SIGHUP handled; SIGTERM/SIGHUP classed as unexpected exit (N-14, N-16) |
-| E-3 dependencies | + `pync` |
+| E-3 dependencies | + `pync` (plus, recommended on Apple Silicon, Homebrew `terminal-notifier`: a system tool, not a Python dependency) |
 | §6 CLI | + `--no-notify`, `--notify-cooldown`, `--notify-test` |
 
 ## 12. Open items
@@ -213,3 +216,4 @@ Unit tests use a **mocked sender** (no real notifications). Live checks are done
 | O-2 | Thumbnail source | Resolved 2026-09-26: committed PNG `assets/claude-icon.png` (N-2) |
 | O-3 | `--notify-cooldown` configurability | Resolved 2026-09-26: CLI flag, default 300 s (§6) |
 | O-4 | Cooldown vs `b` key | Resolved 2026-09-26: `b` does not reset notification cooldowns (N-8) |
+| O-5 | pync's bundled terminal-notifier is Intel-only (Rosetta warning) | Resolved 2026-09-26 (Plan 09): use Homebrew `terminal-notifier` 3.1.0 via pync's PATH preference; no code change; N-1 and §3 amended, README to recommend it |

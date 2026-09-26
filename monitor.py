@@ -13,6 +13,7 @@ import atexit
 import json
 import os
 import platform
+import queue
 import re
 import select
 import signal
@@ -136,6 +137,8 @@ def build_parser() -> argparse.ArgumentParser:
                          help="elevated sudo fs_usage file-level write tracing")
     parser.add_argument("--support-dir", type=str, default=DEFAULT_SUPPORT_DIR,
                          help="override the Claude support directory (testing)")
+    parser.add_argument("--notify-test", action="store_true",
+                         help="send a sample warning and critical notification, then exit")
     return parser
 
 
@@ -1920,6 +1923,193 @@ class LogWriter:
         self._fh.close()
 
 
+# ── §7a Notifications ── (Plans 09, 10)
+
+NOTIFY_TITLE = "Claude Monitor"
+NOTIFY_ICON = Path(__file__).resolve().parent / "assets" / "claude-icon.png"
+TIER_SOUNDS = {"critical": "Basso", "warning": "Glass"}
+SUBTITLE_MAX = 40
+BODY_LINE_MAX = 60
+BODY_MAX_LINES = 2
+
+
+@dataclass(frozen=True)
+class Notification:
+    flag_id: str          # e.g. "cpu:renderer", "diag:<file>", "monitor:exit", "test:warning"
+    tier: str             # "critical" | "warning"
+    title: str
+    subtitle: str
+    body: str             # up to 2 lines joined with "\n"
+
+
+@dataclass
+class SendResult:
+    notification: Notification
+    status: str           # "sent" | "failed"
+    error: str | None
+    first_failure: bool   # True only for the first failure this session (N-22 warn-once)
+
+
+def escape_notifier_text(s: str) -> str:
+    """terminal-notifier treats text starting with '-' or '[' as an option / special input (N-4)."""
+    if s.startswith(("-", "[")):
+        return "\\" + s
+    return s
+
+
+def truncate(s: str, max_len: int) -> str:
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 1] + "…"
+
+
+def shorten_middle(s: str, max_len: int) -> str:
+    """Shorten a long path in the middle, keeping more of the tail (the file name)."""
+    if len(s) <= max_len:
+        return s
+    keep = max_len - 1
+    head = keep // 3
+    tail = keep - head
+    return s[:head] + "…" + s[len(s) - tail:]
+
+
+def notifier_kwargs(n: Notification, icon: Path = NOTIFY_ICON) -> tuple[str, dict]:
+    """Build the (message, kwargs) for pync.Notifier.notify: limits, escaping, sound, thumbnail."""
+    lines = [truncate(line, BODY_LINE_MAX) for line in n.body.split("\n")[:BODY_MAX_LINES]]
+    message = escape_notifier_text("\n".join(lines))
+    kwargs = {
+        "title": escape_notifier_text(n.title),
+        "subtitle": escape_notifier_text(truncate(n.subtitle, SUBTITLE_MAX)),
+        "sound": TIER_SOUNDS.get(n.tier, TIER_SOUNDS["warning"]),
+    }
+    if icon.exists():
+        kwargs["contentImage"] = str(icon)
+    return message, kwargs
+
+
+def load_pync() -> tuple[Any, str | None]:
+    """Import pync once at startup; its import runs `which terminal-notifier` and raises if unusable."""
+    try:
+        import pync
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    return pync, None
+
+
+def _pync_backend(n: Notification, wait: bool) -> None:
+    import pync  # already loaded by load_pync() at startup
+
+    message, kwargs = notifier_kwargs(n)
+    # With wait=True pync raises on a non-zero exit; a launch failure raises OSError either way.
+    pync.Notifier.notify(message, wait=wait, **kwargs)
+
+
+class NotificationSender:
+    """Deliver notifications from one daemon worker thread so the poll loop never blocks (N-3)."""
+
+    def __init__(self, backend: Callable[[Notification, bool], None] | None = None, max_queue: int = 64):
+        self._backend = backend or _pync_backend
+        self._queue: queue.Queue[Notification | None] = queue.Queue(maxsize=max_queue)
+        self._results: queue.Queue[SendResult] = queue.Queue()
+        self._lock = threading.Lock()
+        self._failed_once = False
+        self._worker = threading.Thread(target=self._run, name="notifier", daemon=True)
+        self._worker.start()
+
+    def _result(self, n: Notification, error: str | None) -> None:
+        first = False
+        if error is not None:
+            with self._lock:
+                first = not self._failed_once
+                self._failed_once = True
+        self._results.put(SendResult(n, "failed" if error else "sent", error, first))
+
+    def _run(self) -> None:
+        while True:
+            n = self._queue.get()
+            try:
+                if n is None:
+                    return
+                try:
+                    self._backend(n, True)
+                except Exception as exc:
+                    self._result(n, f"{type(exc).__name__}: {exc}")
+                else:
+                    self._result(n, None)
+            finally:
+                self._queue.task_done()
+
+    def send(self, n: Notification) -> None:
+        try:
+            self._queue.put_nowait(n)
+        except queue.Full:
+            self._result(n, "queue full")
+
+    def drain_results(self) -> list[SendResult]:
+        results = []
+        while True:
+            try:
+                results.append(self._results.get_nowait())
+            except queue.Empty:
+                return results
+
+    def flush(self, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        while self._queue.unfinished_tasks and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+    def fire_and_forget(self, n: Notification) -> None:
+        """Launch without waiting, on the calling thread, bypassing the queue (exit notification, Plan 11)."""
+        try:
+            self._backend(n, False)
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        try:
+            self._queue.put_nowait(None)
+        except queue.Full:
+            pass  # daemon worker; it dies with the process
+
+
+def notify_test(backend: Callable[[Notification, bool], None] | None = None) -> int:
+    """--notify-test (N-21): send one warning and one critical sample, report, exit 0 only if both sent."""
+    if backend is None:
+        _, error = load_pync()
+        if error is not None:
+            print(f"claude-desktop-monitor: cannot load pync: {error}", file=sys.stderr)
+            return 1
+    sender = NotificationSender(backend)
+    samples = [
+        Notification("test:warning", "warning", NOTIFY_TITLE, "Test notification — warning tier",
+                     "Sound: Glass\nIf you can see this, notifications work."),
+        Notification("test:critical", "critical", NOTIFY_TITLE, "Test notification — critical tier",
+                     "Sound: Basso\nIf you can see this, notifications work."),
+    ]
+    for n in samples:
+        sender.send(n)
+    sender.flush(timeout=10)
+    results = {r.notification.flag_id: r for r in sender.drain_results()}
+    sender.close()
+    ok = True
+    for n in samples:
+        r = results.get(n.flag_id)
+        if r is None:
+            ok = False
+            print(f"{n.tier}: no result within 10 s", file=sys.stderr)
+        elif r.status == "sent":
+            print(f"{n.tier}: sent", file=sys.stderr)
+        else:
+            ok = False
+            print(f"{n.tier}: failed ({r.error})", file=sys.stderr)
+    print(
+        "A successful send cannot prove the banner was shown. If nothing appeared, check "
+        "System Settings → Notifications → terminal-notifier, and any Focus mode.",
+        file=sys.stderr,
+    )
+    return 0 if ok else 1
+
+
 # ── §8 Renderers: headless, TUI ──
 
 class HeadlessRenderer:
@@ -2606,6 +2796,8 @@ def _sudo_preflight() -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.notify_test:
+        return notify_test()
     if args.trace_io and not _sudo_preflight():
         print("claude-desktop-monitor: sudo authentication failed; --trace-io requires it.", file=sys.stderr)
         return 1

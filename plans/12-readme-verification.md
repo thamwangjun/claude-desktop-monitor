@@ -33,7 +33,8 @@ A new **Notifications** section after the alert rules:
 4. **Setup and troubleshooting**:
    - Run `uv run monitor.py --notify-test` once. The first notification makes **terminal-notifier** appear in System Settings → Notifications; allow it, and choose the Banners or Alerts style.
    - Focus modes and Do Not Disturb suppress banners silently; the monitor cannot detect this.
-   - A Homebrew `terminal-notifier` on PATH is used in preference to pync's bundled copy.
+   - A Homebrew `terminal-notifier` on PATH is used in preference to pync's bundled copy. **Recommend `brew install terminal-notifier` on Apple Silicon**: the bundled copy (2.0.0) is Intel-only, runs under Rosetta (macOS shows a one-time Intel-components warning) and will likely stop working once Rosetta is limited after macOS 27; Homebrew's 3.1.0 is native arm64. Note that a run without `/opt/homebrew/bin` on PATH falls back to the bundled copy.
+   - `terminal-notifier -diagnose` (3.1.0) reports why notifications may not be appearing.
    - The main icon is terminal-notifier's. The Claude logo appears as a thumbnail, because macOS only takes the main icon from the sending app bundle (a one-paragraph explanation, pointing to REQUIREMENTS-v2 §3).
 5. **Log**: the `notification` record type and its statuses.
 6. CLI table: add `--no-notify`, `--notify-cooldown`, `--notify-test`.

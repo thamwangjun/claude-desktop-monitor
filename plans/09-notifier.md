@@ -149,7 +149,7 @@ At runtime only `NOTIFY_ICON.exists()` is checked; no dependency on Claude.app o
 - Text limits: subtitle 40 chars, body lines 60 chars. Reviewed 2026-09-26; two §5 hints were reworded to fit.
 - Thumbnail at `assets/claude-icon.png`. Reviewed 2026-09-26.
 - `--notify-test` sample wording as above; exit 0 only if both sends succeed. Reviewed 2026-09-26.
-- A PATH `terminal-notifier` (e.g. Homebrew) takes precedence over pync's vendored copy; this is pync's behaviour and is left as is.
+- A PATH `terminal-notifier` (e.g. Homebrew) takes precedence over pync's vendored copy; this is pync's behaviour and is left as is. 2026-09-26, during V-8: the vendored 2.0.0 turned out to be x86_64-only (Rosetta warning), so the reference machine now uses Homebrew `terminal-notifier` 3.1.0 (arm64) through this precedence; no code change (REQUIREMENTS-v2 §3, N-1, O-5).
 
 ## Out of scope
 

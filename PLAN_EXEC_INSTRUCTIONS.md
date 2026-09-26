@@ -63,6 +63,7 @@ Checks that need the user are listed in §9. Ask the user to do those; don't wor
 | Runtime deps | `psutil`, `rich`, `watchdog`, and from Plan 09 **`pync`** (which pulls in `python-dateutil`; pync 2.0.3 is an sdist, which `uv sync` builds). Dev only: `pytest` (`[dependency-groups] dev`). Nothing else without asking. |
 | Claude Desktop | `/Applications/Claude.app`, version 2.9939.2, bundle ID `com.anthropic.claudefordesktop`. Cowork VM downloaded. |
 | Docker Desktop | Installed and often running. Runs its **own** `com.apple.Virtualization.VirtualMachine` process, which must never be counted as Claude's. |
+| terminal-notifier | Homebrew **3.1.0** at `/opt/homebrew/bin/terminal-notifier` (native arm64, installed 2026-09-26). pync picks it up via PATH in preference to its Intel-only vendored copy. |
 | Xcode CLT SDK | `/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk` (public headers only) |
 
 Commands:
@@ -174,6 +175,7 @@ Processes that match a naive "claude" name search but are **not** Claude Desktop
   - `sender=com.anthropic.claudefordesktop` shows nothing.
   - A custom `osacompile` applet never registered.
 - terminal-notifier treats a message starting with `-` or `[` specially; escape it.
+- pync's vendored `terminal-notifier.app` 2.0.0 is **x86_64 only** (runs under Rosetta; macOS 26 warns about Intel components). The machine uses **Homebrew terminal-notifier 3.1.0** instead: a bash wrapper exec'ing a native arm64 `terminal-notifier.app`, same bundle ID `fr.julienxx.oss.terminal-notifier`, ad-hoc signed, min macOS 26. It supports `-message/-title/-subtitle/-sound/-contentImage`, drops `-appIcon`/`-sender`, adds `-diagnose`. pync's `Notifier.bin_path` is a `bytes` path when found via PATH (works with `Popen`).
 - Notifications disabled in System Settings, Focus and Do Not Disturb produce **no error**; only a launch failure or non-zero exit is detectable.
 - Claude's icon: `/Applications/Claude.app/Contents/Resources/electron.icns`. The thumbnail is committed as `assets/claude-icon.png` (`sips -s format png -Z 256 …`).
 - Sounds: `Basso` (critical), `Glass` (warning).
