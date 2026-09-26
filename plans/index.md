@@ -277,3 +277,56 @@ Considered and rejected: merging 13 and 14 (the rename would carry behaviour cha
 | 15 | Done (9f8a858) — no code changes (README only). Deviation: fixed a stale doc bug from Plan 13 while editing the same section — Developer setup's `mise install` comment still said uv 0.12.18; `mise.toml` already pins 0.12.19 (E-1's bump landed in Plan 13, whose "docs' commands" task missed this line). `uv run pytest` passing (172 tests); `git status` clean before the user gate. README: Homebrew install first (`## Install`), developer setup second (`## Developer setup`), license section added, log location and `session_start.versions.monitor` noted; only the 9 approved issues are linked (`#51913` stays unlinked, as approved in Plan 08). User pushed `main` and the annotated tag `v0.3.0` (`git tag -a`/`git push origin main`/`git push origin v0.3.0`, all HTTPS to `https://github.com/thamwangjun/claude-desktop-monitor.git`). `git ls-remote --tags origin` confirms `v0.3.0` peels to commit `d1bab23` (the status-recording commit above). Archive `https://github.com/thamwangjun/claude-desktop-monitor/archive/refs/tags/v0.3.0.tar.gz` sha256 `f580bd37a4e2cb55baf8080b09a2587b7ed7f32b09f92428197b3da1114e9e1a`; contains `src/claude_desktop_monitor/monitor.py`, `src/claude_desktop_monitor/assets/claude-icon.png`, `LICENSE` and `pyproject.toml`. |
 | 16 | Done (7aa50f5) — deviation: tap CI's first run of PR #1 failed `brew audit --new` (the installed-prefix check test-bot runs after a real install, which a bare local `brew audit` doesn't do) on pync's vendored x86_64 `terminal-notifier.app` landing in `libexec` via `virtualenv_install_with_resources`; fixed by removing it in the formula's `install` (`Dir.glob` + `rm_r`, since it's unreachable at runtime anyway — the PATH wrapper (B-5) always finds Homebrew's arm64 `terminal-notifier` first, and `brew test`'s import/`--help` check had already passed against the *first* run before the audit step, proving that). No other deviations. `mise.toml` gained `rust = "1.98.1"`; `mise exec -- rustc --version` confirms it; `brew list --versions rust` stayed empty throughout (start, after `tap-new`/`style`/`audit`, and at the end). `../homebrew-tap` (`thamwangjun/homebrew-tap`, previously empty) got `main` (`b41df3e`, `brew tap-new` CI templates — the generated test matrix was already `macos-26`-only, no reduction needed) and branch `claude-desktop-monitor-0.3.0` (`faf6cbc` after the audit fix, force-pushed over the user's initial push of `3de92ec`) with the formula and all 9 `brew update-python-resources` blocks, versions matching `uv.lock` exactly. V-19 passed: every resource sdist and the project's own `uv build` sdist installed into a scratch venv under mise's Rust (`pip install --no-binary :all:`), `uv_build` visibly compiled from source via `cargo` (not fetched as a wheel), `claude-desktop-monitor --help` and the package import both succeeded, Homebrew's `rust` never installed. `brew style` and `brew audit --strict --online` pass clean (one autocorrect: `formula_opt_bin` instead of `Formula[...].opt_bin`). User set the tap's repository settings, pushed `main` and the formula branch, and opened PR #1; V-16 passed live: CI green on `macos-26` (13m27s, from-source build) plus the tap's Linux tap-syntax job, with a `bottles_macos-26` artifact (1.97 MB) uploaded. Developer mode confirmed off (`brew developer`) at the end. `uv run pytest` (172 tests) passing throughout. |
 | 17 | Done (6d6856f) — no code or formula changes; no defects found. User triggered the tap's generated "brew pr-pull" workflow (run [36265716650](https://github.com/thamwangjun/homebrew-tap/actions/runs/36265716650)), which pushed the `bottle do` block (`arm64_tahoe`) to the tap's `main` (`e9f9a9c`) and uploaded the release `claude-desktop-monitor-0.3.0`; PR #1 closed. V-17 live: `brew untap`/`brew tap thamwangjun/tap` (real GitHub tap) then `brew install thamwangjun/tap/claude-desktop-monitor` poured the bottle (no Rust build step); `brew list --versions rust` empty before and after; `brew test` and `brew audit --strict --online` both passed clean. V-18 live: wrapper (`$(brew --prefix)/bin/claude-desktop-monitor`) confirmed prepending Homebrew `terminal-notifier`'s `opt` bin to `PATH`; user-confirmed interactive TUI run (dashboard, new log path in header, clean `q` exit); headless 15s run with no `--log` wrote `session_start.versions.monitor == "0.3.0"` under the default directory and a clean `SIGINT` `session_end`; `--notify-test` under `env -i` with a minimal `PATH` sent both banners, user-confirmed both appeared (Glass/Basso) with the Claude thumbnail and no Rosetta prompt. `brew developer` was off at the start, `brew test` turned it back on, `brew developer off` restored it. `uv run pytest`: 172 passed. Results in `plans/17-verification-results.md`; `requirements/REQUIREMENTS-v3.md` status set to "agreed requirements, implemented (plans 13–17)". |
+
+---
+
+# v3.1: CPU default 90% (plans 18–19)
+
+Requirements: [`../requirements/REQUIREMENTS-v3.1.md`](../requirements/REQUIREMENTS-v3.1.md), incremental on v1, v2 and v3. v3.1 raises the default `--cpu-threshold` from 30 to 90 (% of one core, same unit; clears below 81%) and ships it as 0.3.1 through the tap. Nothing else changes.
+
+## The plans
+
+| # | Plan | Delivers | Checkpoint (done when) |
+|---|---|---|---|
+| 18 | [CPU default and 0.3.1 prep](18-cpu-default.md) | Default 90 (CLI and `Analyzer` fallback), version 0.3.1, tests, README/`CLAUDE.md`/`PLAN_EXEC_INSTRUCTIONS.md`. **User** pushes and tags `v0.3.1` | V-20 suite, V-21 dev run; tag on GitHub, archive `sha256` recorded |
+| 19 | [Formula bump, bottle, publish](19-release-0.3.1.md) | Tap branch `claude-desktop-monitor-0.3.1` (`url`/`sha256`). **User** opens the PR, then publishes | V-22 CI bottle and publish; V-23 `brew upgrade` pours 0.3.1, installed copy defaults to 90 |
+
+## Order and dependencies
+
+```
+18 CPU default & tag ══> 19 Formula, CI & publish
+     (user tags)            (user opens PR, publishes)
+```
+
+Strictly sequential; `══>` marks a user gate, as in v3.
+
+## Why the work is split this way
+
+1. **The tag is the cut.** Everything before `v0.3.1` happens in one repository, can be undone, and is verified locally. Everything after it depends on an immutable tag and its sha256, and goes through the user's PR and publish gates.
+2. **Code, tests and docs together in 18.** The docs have to match the tagged code. v3 kept the README separate (Plan 15) only because it was a large rewrite; here it's two table cells.
+3. **Formula and publish together in 19.** v3 separated them (16/17) because 16 was a new formula, with the V-19 local build from source and a first audit. A version bump is two lines, and CI → publish → upgrade is one chain.
+
+Considered and rejected: one plan (it would stay open across three user actions); three plans mirroring v3 (overhead for a one-line change).
+
+## Requirement traceability
+
+| Requirement IDs | Plan |
+|---|---|
+| C-3 (amended), E-11 (0.3.1, tag), W-3 (incl. #22543 wording), W-4 (version), V-20, V-21 | 18 |
+| B-10, W-4 (v3.1 done), V-22, V-23 | 19 |
+
+W-4's authority chain, v3 status and v3.1 plan entries were done with the plans, before Plan 18.
+
+## Plan-level decisions (v3.1): reviewed with the user 2026-09-27
+
+| Plan | Decision |
+|---|---|
+| 18 | `Analyzer` fallback Namespace also set to 90; new test reads the default from `parse_args([])`; tests with explicit `cpu_threshold=30.0` kept; V-21 logs to `/tmp`; annotated tag |
+| 19 | Branch cut from published `origin/main`; formula edited by hand (no `bump-formula-pr`, which pushes); only `brew style` locally, audit in CI and post-publish; `brew upgrade` rather than retap; no `--notify-test`; results in the status note, no separate results file |
+
+## Status (v3.1)
+
+| Plan | Status |
+|---|---|
+| 18 | Not started |
+| 19 | Not started |
