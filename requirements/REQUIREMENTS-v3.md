@@ -1,6 +1,6 @@
 # Claude Desktop Resource Monitor — Requirements v3
 
-Status: agreed requirements, pre-implementation (2026-09-27). Grey areas 1–27 resolved with the user; open items in §12 resolved.
+Status: agreed requirements, implemented (plans 13–17). Grey areas 1–27 resolved with the user; open items in §12 resolved.
 
 v3 is an **incremental** change on top of [`REQUIREMENTS-v1.md`](REQUIREMENTS-v1.md) and [`REQUIREMENTS-v2.md`](REQUIREMENTS-v2.md), which remain authoritative for everything not mentioned here. Where v3 amends an item, v3 wins. v1 (plans 01–08) and v2 (plans 09–12) are fully implemented.
 
