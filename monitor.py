@@ -2031,8 +2031,21 @@ def _pync_backend(n: Notification, wait: bool) -> None:
     import pync  # already loaded by load_pync() at startup
 
     message, kwargs = notifier_kwargs(n)
-    # With wait=True pync raises on a non-zero exit; a launch failure raises OSError either way.
-    pync.Notifier.notify(message, wait=wait, **kwargs)
+    if wait:
+        # With wait=True pync raises on a non-zero exit; a launch failure raises OSError either way.
+        pync.Notifier.notify(message, wait=True, **kwargs)
+        return
+    # Fire-and-forget (the exit notification, Plan 11): pync's own Popen call inherits the
+    # caller's process group, so a real SIGHUP (a closed tmux pane) that kills the monitor also
+    # kills a just-launched terminal-notifier before it can show anything. start_new_session=True
+    # detaches the child into its own session so it survives the parent's hangup.
+    args = ["-message", message]
+    for key, value in kwargs.items():
+        args += [f"-{key}", str(value)]
+    subprocess.Popen(
+        [pync.Notifier.bin_path, *args], start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
 
 
 class NotificationSender:
@@ -2194,6 +2207,14 @@ def build_notification(event: dict) -> Notification:
     return Notification(flag_id, tier, NOTIFY_TITLE, subtitle, body)
 
 
+def build_exit_notification(cause: str, log_path: str) -> Notification:
+    """The critical, cooldown-exempt notification sent on an unexpected exit (N-14, Plan 11)."""
+    prefix = "Alerts have stopped. Log: "
+    path = shorten_middle(log_path, max(BODY_LINE_MAX - len(prefix), 1))
+    body = f"{cause}\n{prefix}{path}"
+    return Notification("monitor:exit", "critical", NOTIFY_TITLE, "Monitor stopped unexpectedly", body)
+
+
 def notification_record(n: Notification, status: str, error: str | None = None) -> dict:
     record = {
         "type": "notification", "id": n.flag_id, "tier": n.tier,
@@ -2297,6 +2318,10 @@ class HeadlessRenderer:
     def stop(self) -> None:
         pass
 
+    def on_notify_warning(self, message: str) -> None:
+        ts = time.strftime("%H:%M:%S")
+        print(f"{ts} NOTIFY-WARN {message}", file=sys.stderr)
+
 
 # -- TUI formatting helpers --
 
@@ -2354,9 +2379,11 @@ class TuiRenderer:
     """Live `rich` dashboard (§8, Plan 07). Computes no analysis of its own;
     every value shown comes from the sample or `derived` passed to render()."""
 
-    def __init__(self, args: argparse.Namespace, log_path: str):
+    def __init__(self, args: argparse.Namespace, log_path: str, notify_state: str = "on"):
         self.args = args
         self._log_path = log_path
+        self._notify_state = notify_state
+        self._notify_warning: str | None = None
         self._console = Console()
         self._live: Live | None = None
         self._show_pids = False
@@ -2395,7 +2422,10 @@ class TuiRenderer:
             self._historic_diag = sample["diag"]["historic"]
         renderable = self._build_renderable(sample, derived, active_flags)
         if self._live is not None:
-            self._live.update(renderable, refresh=True)
+            try:
+                self._live.update(renderable, refresh=True)
+            except OSError:
+                pass  # terminal gone (e.g. a closed tmux pane, SIGHUP); the poll loop notices and exits
 
     def on_flag(self, event: dict) -> None:
         now = time.monotonic()
@@ -2407,6 +2437,11 @@ class TuiRenderer:
             self._flag_info[flag_id] = {"message": event.get("message"), "raised_at": now}
         elif event.get("state") == "cleared":
             self._flag_info.pop(flag_id, None)
+
+    def on_notify_warning(self, message: str) -> None:
+        """First notification failure this session (N-22): shown in the header until the session ends."""
+        self._notify_warning = message
+        self._rerender_last()
 
     def poll_keys(self, timeout: float) -> list[str]:
         if not self._is_tty_stdin:
@@ -2526,18 +2561,36 @@ class TuiRenderer:
         elapsed = sample.get("elapsed") or 0.0
         start_str = self._start_wall.strftime("%Y-%m-%d %H:%M:%S %Z") if self._start_wall else "n/a"
         lines = [
-            f"Session start: {start_str}  Elapsed: {_fmt_duration(elapsed)}  "
-            f"Interval: {self.args.interval:.0f}s  Log: {self._log_path}",
-            f"Claude: {status}  App: {version}  "
-            f"Main PID: {main_pid if main_pid is not None else 'n/a'}  "
-            f"Coalition: {cid if cid is not None else 'n/a'}  "
-            f"trace-io: {'on' if self.args.trace_io else 'off'}",
-            f"q quit · p PIDs ({'shown' if self._show_pids else 'hidden'}) · m marker · b reset"
-            + ("" if self._is_tty_stdin else "  (keys disabled: stdin is not a TTY)"),
+            Text(
+                f"Session start: {start_str}  Elapsed: {_fmt_duration(elapsed)}  "
+                f"Interval: {self.args.interval:.0f}s  Log: {self._log_path}"
+            ),
+            Text(
+                f"Claude: {status}  App: {version}  "
+                f"Main PID: {main_pid if main_pid is not None else 'n/a'}  "
+                f"Coalition: {cid if cid is not None else 'n/a'}  "
+                f"trace-io: {'on' if self.args.trace_io else 'off'}  "
+                f"{self._notify_header_text()}"
+            ),
+            Text(
+                f"q quit · p PIDs ({'shown' if self._show_pids else 'hidden'}) · m marker · b reset"
+                + ("" if self._is_tty_stdin else "  (keys disabled: stdin is not a TTY)")
+            ),
         ]
         if hidden_rows:
-            lines.append(f"(terminal too small: {hidden_rows} rows hidden)")
-        return Panel("\n".join(lines), title="claude-desktop-monitor")
+            lines.append(Text(f"(terminal too small: {hidden_rows} rows hidden)"))
+        if self._notify_warning is not None:
+            lines.append(Text(self._notify_warning, style="yellow"))
+        return Panel(Group(*lines), title="claude-desktop-monitor")
+
+    def _notify_header_text(self) -> str:
+        if self._notify_state == "unavailable":
+            return "notify: off (unavailable: see log)"
+        if self._notify_state == "off":
+            return "notify: off"
+        if self._notify_warning is not None:
+            return "notify: on (failing: see log)"
+        return "notify: on"
 
     def _build_body(self, sample: dict, derived: dict, active: set[str]):
         left = [
@@ -2835,20 +2888,42 @@ def _collect_host() -> dict:
 @dataclass
 class _RunState:
     stop_requested: bool = False
-    stop_reason: str = "quit"
+    stop_reason: str = "quit"  # "quit" | "sigint" | "sigterm" | "sighup"
     marker_pending: str | None = None
 
 
+# stop_reason -> (session_end.reason, session_end.signal, unexpected)
+_STOP_REASON_INFO = {
+    "quit": ("quit", None, False),
+    "sigint": ("signal", "SIGINT", False),
+    "sigterm": ("signal", "SIGTERM", True),
+    "sighup": ("signal", "SIGHUP", True),
+}
+
+
+def _session_end_record(stop_reason: str) -> dict:
+    reason, signal_name, _ = _STOP_REASON_INFO[stop_reason]
+    record = {"type": "session_end", "reason": reason}
+    if signal_name is not None:
+        record["signal"] = signal_name
+    return record
+
+
 def _install_signal_handlers(state: _RunState) -> None:
-    def _on_term(signum, _frame):
-        state.stop_requested = True
-        state.stop_reason = "signal"
+    def _make_handler(reason: str):
+        def _handler(signum, _frame):
+            state.stop_requested = True
+            state.stop_reason = reason
+        return _handler
 
     def _on_usr1(signum, _frame):
         state.marker_pending = "SIGUSR1"
 
-    signal.signal(signal.SIGINT, _on_term)
-    signal.signal(signal.SIGTERM, _on_term)
+    signal.signal(signal.SIGINT, _make_handler("sigint"))
+    signal.signal(signal.SIGTERM, _make_handler("sigterm"))
+    # nohup sets SIGHUP to SIG_IGN before exec; a headless run must keep that (N-16).
+    if signal.getsignal(signal.SIGHUP) != signal.SIG_IGN:
+        signal.signal(signal.SIGHUP, _make_handler("sighup"))
     if hasattr(signal, "SIGUSR1"):
         signal.signal(signal.SIGUSR1, _on_usr1)
 
@@ -2872,10 +2947,6 @@ def run(args: argparse.Namespace) -> int:
     ]
     analyzer = Analyzer(args)
 
-    is_tty = sys.stdout.isatty()
-    use_headless = args.no_tui or not is_tty
-    renderer = HeadlessRenderer(args.log, args.interval) if use_headless else TuiRenderer(args, args.log)
-
     state = _RunState()
     _install_signal_handlers(state)
 
@@ -2895,6 +2966,10 @@ def run(args: argparse.Namespace) -> int:
                 "subtitle": "", "body": "", "status": "failed", "error": pync_error,
             })
 
+    is_tty = sys.stdout.isatty()
+    use_headless = args.no_tui or not is_tty
+    renderer = HeadlessRenderer(args.log, args.interval) if use_headless else TuiRenderer(args, args.log, notify_state)
+
     log.write({
         "type": "session_start",
         "config": {**vars(args), "notify": not args.no_notify},
@@ -2903,10 +2978,13 @@ def run(args: argparse.Namespace) -> int:
     })
 
     renderer.start()
+    if notify_state == "unavailable":
+        renderer.on_notify_warning("notifications unavailable (pync failed to load); see log")
 
     start = time.monotonic()
     seq = 0
-    reason = "quit"
+    session_end_record: dict = {"type": "session_end", "reason": "quit"}
+    exit_cause: str | None = None  # set when the exit is unexpected (N-14)
     try:
         while not state.stop_requested:
             now = time.monotonic()
@@ -2932,6 +3010,10 @@ def run(args: argparse.Namespace) -> int:
             if sender is not None:
                 for result in sender.drain_results():
                     log.write(notification_record(result.notification, result.status, result.error))
+                    if result.first_failure:
+                        renderer.on_notify_warning(
+                            f"notification failed ({result.error}); monitoring continues, see log"
+                        )
             renderer.render(sample, derived, sample["active_flags"])
 
             seq += 1
@@ -2950,22 +3032,26 @@ def run(args: argparse.Namespace) -> int:
             if state.marker_pending is not None:
                 log.write({"type": "marker", "label": state.marker_pending})
                 state.marker_pending = None
-        reason = state.stop_reason
-    except Exception:
+        session_end_record = _session_end_record(state.stop_reason)
+        _, signal_name, unexpected = _STOP_REASON_INFO[state.stop_reason]
+        if unexpected:
+            exit_cause = signal_name
+    except Exception as exc:
         import traceback
 
-        log.write({"type": "session_end", "reason": "error", "traceback": traceback.format_exc()})
-        _flush_notifications(sender, log)
-        renderer.stop()
-        for collector in collectors:
-            collector.close()
-        log.close()
+        exit_cause = f"{type(exc).__name__}: {exc}"
+        session_end_record = {"type": "session_end", "reason": "error", "traceback": traceback.format_exc()}
         raise
-    else:
-        log.write({"type": "session_end", "reason": reason})
     finally:
-        _flush_notifications(sender, log)
+        # Terminal restored first, then the exit notification launched immediately and without
+        # waiting (N-14), before the bounded flush of any already-queued flag notifications.
         renderer.stop()
+        if exit_cause is not None and sender is not None:
+            exit_notification = build_exit_notification(exit_cause, args.log)
+            sender.fire_and_forget(exit_notification)
+            log.write(notification_record(exit_notification, "dispatched"))
+        _flush_notifications(sender, log)
+        log.write(session_end_record)
         for collector in collectors:
             collector.close()
         log.close()

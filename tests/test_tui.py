@@ -47,9 +47,9 @@ def render_to_text(renderer, sample, derived, active_flags, styles=False):
     return console.export_text(styles=styles)
 
 
-def make_renderer(args=None):
+def make_renderer(args=None, notify_state="on"):
     args = args or make_args()
-    renderer = monitor.TuiRenderer(args, "logs/test.jsonl")
+    renderer = monitor.TuiRenderer(args, "logs/test.jsonl", notify_state)
     renderer._start_wall = None
     import datetime
     renderer._start_wall = datetime.datetime.now().astimezone()
@@ -165,3 +165,73 @@ def test_per_pid_rows_toggle():
     renderer._show_pids = False
     hidden_again = render_to_text(renderer, sample, derived, active)
     assert "333" not in hidden_again
+
+
+# ── header: notify state (Plan 11) ──
+
+def render_header_to_text(renderer, sample, styles=False):
+    console = Console(record=True, width=200, force_terminal=True)
+    renderer._console = console
+    header = renderer._build_header(sample, hidden_rows=0)
+    console.print(header)
+    return console.export_text(styles=styles)
+
+
+def test_header_shows_notify_on():
+    renderer = make_renderer(notify_state="on")
+    text = render_header_to_text(renderer, base_sample(0.0))
+    assert "notify: on" in text
+
+
+def test_header_shows_notify_off():
+    renderer = make_renderer(notify_state="off")
+    text = render_header_to_text(renderer, base_sample(0.0))
+    assert "notify: off" in text
+    assert "unavailable" not in text
+
+
+def test_header_shows_notify_unavailable():
+    renderer = make_renderer(notify_state="unavailable")
+    text = render_header_to_text(renderer, base_sample(0.0))
+    assert "notify: off (unavailable: see log)" in text
+
+
+def test_header_shows_failing_after_notify_warning():
+    renderer = make_renderer(notify_state="on")
+    renderer.on_notify_warning("notification failed (boom); monitoring continues, see log")
+    text = render_header_to_text(renderer, base_sample(0.0))
+    assert "notify: on (failing: see log)" in text
+    assert "notification failed (boom); monitoring continues, see log" in text
+
+
+def test_header_warning_is_styled_yellow():
+    renderer = make_renderer(notify_state="on")
+    renderer.on_notify_warning("notification failed (boom); monitoring continues, see log")
+    styled = render_header_to_text(renderer, base_sample(0.0), styles=True)
+    assert "\x1b[33m" in styled  # yellow ANSI escape for the warning line
+
+
+# ── dead-TTY tolerance (Plan 11, N-16: a closed tmux pane / SIGHUP) ──
+
+class _RaisingLive:
+    def update(self, renderable, refresh=True):
+        raise OSError(5, "Input/output error")
+
+    def stop(self):
+        raise OSError(5, "Input/output error")
+
+
+def test_render_tolerates_dead_tty_oserror():
+    renderer = make_renderer()
+    renderer._live = _RaisingLive()
+    sample = base_sample(0.0)
+    # Must not raise even though the underlying Live/console write fails.
+    renderer.render(sample, {}, [])
+
+
+def test_stop_tolerates_dead_tty_oserror():
+    renderer = make_renderer()
+    renderer._live = _RaisingLive()
+    renderer._is_tty_stdin = False
+    # Must not raise even though Live.stop() fails on a dead terminal.
+    renderer.stop()
