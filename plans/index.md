@@ -200,7 +200,7 @@ Strictly sequential. 10 and 11 both depend only on 09, but both edit `run()` (§
 
 | Plan | Status |
 |---|---|
-| 09 | Not started |
+| 09 | Done (3690ede) — no code deviations. Docs deviation: pync's vendored terminal-notifier 2.0.0 is x86_64-only (Rosetta warning seen during V-8); the reference machine now uses Homebrew terminal-notifier 3.1.0 (arm64) via pync's PATH preference. N-1 and §3 of REQUIREMENTS-v2 amended (O-5); Plan 12 README to recommend it. V-8 passed with the Homebrew binary (both banners, sounds and thumbnail confirmed by the user; exit 0). `uv sync` from a clean `.venv` OK. The pytest fork `DeprecationWarning` in `test_native.py` predates v2. |
 | 10 | Not started |
 | 11 | Not started |
 | 12 | Not started |
