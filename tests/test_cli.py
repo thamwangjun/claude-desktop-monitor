@@ -92,3 +92,24 @@ def test_defaults():
 def test_cpu_window_must_be_at_least_interval():
     with pytest.raises(SystemExit):
         monitor.parse_args(["--interval", "5", "--cpu-window", "3"])
+
+
+def test_notify_defaults():
+    args = monitor.parse_args([])
+    assert args.no_notify is False
+    assert args.notify_cooldown == 300.0
+
+
+def test_no_notify_flag_parses():
+    args = monitor.parse_args(["--no-notify"])
+    assert args.no_notify is True
+
+
+def test_notify_cooldown_custom_value():
+    args = monitor.parse_args(["--notify-cooldown", "0"])
+    assert args.notify_cooldown == 0.0
+
+
+def test_notify_cooldown_negative_rejected():
+    with pytest.raises(SystemExit):
+        monitor.parse_args(["--notify-cooldown", "-1"])

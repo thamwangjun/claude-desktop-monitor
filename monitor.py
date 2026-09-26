@@ -139,6 +139,10 @@ def build_parser() -> argparse.ArgumentParser:
                          help="override the Claude support directory (testing)")
     parser.add_argument("--notify-test", action="store_true",
                          help="send a sample warning and critical notification, then exit")
+    parser.add_argument("--no-notify", action="store_true",
+                         help="disable macOS notifications")
+    parser.add_argument("--notify-cooldown", type=float, default=300.0,
+                         help="per-flag notification cooldown in seconds, 0 = none (default 300)")
     return parser
 
 
@@ -153,6 +157,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--budget-warn must be in (0, 100]")
     if args.mem_growth <= 0:
         parser.error("--mem-growth must be > 0")
+    if args.notify_cooldown < 0:
+        parser.error("--notify-cooldown must be >= 0")
     args.support_dir = os.path.expanduser(args.support_dir)
     if args.log is None:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1659,7 +1665,7 @@ class Analyzer:
 
         bundle_total_alloc = derived["bundle:total:alloc"]["cur"]
         self._bundle_flags(events, elapsed, bundle, bundle_total_alloc)
-        self._swap_streak_flag(events, swapouts)
+        self._swap_streak_flag(events, swapouts, swap.get("used"))
         derived["swap_streak"] = self._swap_streak
         self._attribution_flag(events, sample.get("processes") or [])
         self._diag_events(events, sample.get("diag") or {})
@@ -1733,13 +1739,17 @@ class Analyzer:
 
     # -- flag helpers --
 
-    def _raise(self, events: list[dict], flag_id: str, metric: str, value, threshold, message: str) -> None:
+    def _raise(self, events: list[dict], flag_id: str, metric: str, value, threshold, message: str,
+               details: dict | None = None) -> None:
         if flag_id not in self._raised:
             self._raised.add(flag_id)
-            events.append({
+            event = {
                 "id": flag_id, "state": "raised", "metric": metric,
                 "value": value, "threshold": threshold, "message": message,
-            })
+            }
+            if details is not None:
+                event["details"] = details
+            events.append(event)
 
     def _clear(self, events: list[dict], flag_id: str, metric: str, value, threshold, message: str) -> None:
         if flag_id in self._raised:
@@ -1749,11 +1759,15 @@ class Analyzer:
                 "value": value, "threshold": threshold, "message": message,
             })
 
-    def _event(self, events: list[dict], flag_id: str, metric: str, value, threshold, message: str) -> None:
-        events.append({
+    def _event(self, events: list[dict], flag_id: str, metric: str, value, threshold, message: str,
+               details: dict | None = None) -> None:
+        event = {
             "id": flag_id, "state": "event", "metric": metric,
             "value": value, "threshold": threshold, "message": message,
-        })
+        }
+        if details is not None:
+            event["details"] = details
+        events.append(event)
 
     def _cpu_flag(self, events: list[dict], suffix: str, flag_id: str, out: dict) -> None:
         avg = out["avg"]
@@ -1761,7 +1775,9 @@ class Analyzer:
             return
         if avg > self.cpu_threshold:
             self._raise(events, flag_id, "cpu_pct", avg, self.cpu_threshold,
-                        f"{suffix} CPU {self.cpu_window_s:.0f}s avg {avg:.1f}% > {self.cpu_threshold:.0f}%")
+                        f"{suffix} CPU {self.cpu_window_s:.0f}s avg {avg:.1f}% > {self.cpu_threshold:.0f}%",
+                        details={"role": suffix, "window_s": self.cpu_window_s, "avg": avg,
+                                 "baseline": self._baselines.get(flag_id)})
         elif avg < _CLEAR_HYSTERESIS * self.cpu_threshold:
             self._clear(events, flag_id, "cpu_pct", avg, self.cpu_threshold,
                         f"{suffix} CPU {self.cpu_window_s:.0f}s avg {avg:.1f}% recovered")
@@ -1776,7 +1792,9 @@ class Analyzer:
         if ratio > threshold_frac:
             self._raise(events, flag_id, "footprint", avg, self.mem_growth,
                         f"{suffix} memory 5m avg {format_bytes(avg)} > baseline "
-                        f"{format_bytes(baseline)} + {self.mem_growth:.0f}%")
+                        f"{format_bytes(baseline)} + {self.mem_growth:.0f}%",
+                        details={"role": suffix, "avg": avg, "baseline": baseline,
+                                 "growth_pct": self.mem_growth})
         elif ratio < _CLEAR_HYSTERESIS * threshold_frac:
             self._clear(events, flag_id, "footprint", avg, self.mem_growth,
                         f"{suffix} memory 5m avg {format_bytes(avg)} recovered toward baseline")
@@ -1787,7 +1805,8 @@ class Analyzer:
             return
         if avg > self.write_threshold:
             self._raise(events, flag_id, "write_rate", avg, self.write_threshold,
-                        f"{suffix} write rate 60s avg {format_bytes(avg)}/s > {format_bytes(self.write_threshold)}/s")
+                        f"{suffix} write rate 60s avg {format_bytes(avg)}/s > {format_bytes(self.write_threshold)}/s",
+                        details={"role": suffix, "avg": avg})
         elif avg < _CLEAR_HYSTERESIS * self.write_threshold:
             self._clear(events, flag_id, "write_rate", avg, self.write_threshold,
                         f"{suffix} write rate 60s avg {format_bytes(avg)}/s recovered")
@@ -1809,12 +1828,16 @@ class Analyzer:
         }
 
     def _budget_flags(self, events: list[dict], write_budget: dict) -> None:
-        for tier, pct_key, budget in (("2g", "pct_2g", _BUDGET_2G), ("8g", "pct_8g", _BUDGET_8G)):
+        for tier, pct_key, budget, tier_label in (
+            ("2g", "pct_2g", _BUDGET_2G, "2 GiB"), ("8g", "pct_8g", _BUDGET_8G, "8 GiB"),
+        ):
             flag_id = f"budget:{tier}"
             pct = write_budget[pct_key]
             if pct >= self.budget_warn:
                 self._raise(events, flag_id, pct_key, pct, self.budget_warn,
-                            f"Total Claude writes {pct:.1f}% of {format_bytes(budget)}/24h budget")
+                            f"Total Claude writes {pct:.1f}% of {format_bytes(budget)}/24h budget",
+                            details={"tier_label": tier_label, "pct": pct,
+                                     "written_24h": write_budget["bytes"], "budget": budget})
             elif pct < _CLEAR_HYSTERESIS * self.budget_warn:
                 self._clear(events, flag_id, pct_key, pct, self.budget_warn,
                             f"Total Claude writes {pct:.1f}% of {format_bytes(budget)}/24h budget, recovered")
@@ -1827,7 +1850,8 @@ class Analyzer:
             growth = total_alloc - (self._bundle_growth_start or 0.0)
             if growth > self.bundle_growth:
                 self._raise(events, "bundle:growth", "allocated", growth, self.bundle_growth,
-                            f"VM bundle grown {format_bytes(growth)} since start > {format_bytes(self.bundle_growth)}")
+                            f"VM bundle grown {format_bytes(growth)} since start > {format_bytes(self.bundle_growth)}",
+                            details={"growth": growth})
             elif growth < _CLEAR_HYSTERESIS * self.bundle_growth:
                 self._clear(events, "bundle:growth", "allocated", growth, self.bundle_growth,
                             f"VM bundle growth {format_bytes(growth)} since start, recovered")
@@ -1838,7 +1862,8 @@ class Analyzer:
                 rate = total_alloc - oldest
                 if rate > self.bundle_rate:
                     self._raise(events, "bundle:rate", "allocated", rate, self.bundle_rate,
-                                f"VM bundle grew {format_bytes(rate)} in the last 10m > {format_bytes(self.bundle_rate)}")
+                                f"VM bundle grew {format_bytes(rate)} in the last 10m > {format_bytes(self.bundle_rate)}",
+                                details={"rate": rate})
                 elif rate < _CLEAR_HYSTERESIS * self.bundle_rate:
                     self._clear(events, "bundle:rate", "allocated", rate, self.bundle_rate,
                                 f"VM bundle 10m growth {format_bytes(rate)}, recovered")
@@ -1848,7 +1873,7 @@ class Analyzer:
             if self._bundle_zst_prev is not None and zst_present != self._bundle_zst_prev:
                 verb = "appeared" if zst_present else "disappeared"
                 self._event(events, "bundle:zst", "zst_present", zst_present, None,
-                            f"rootfs.img.zst {verb}")
+                            f"rootfs.img.zst {verb}", details={"present": zst_present})
             self._bundle_zst_prev = zst_present
 
             stale_now = {
@@ -1859,14 +1884,15 @@ class Analyzer:
                 flag_id = f"partial:{path}"
                 age = partials_by_path[path]["age_s"]
                 self._raise(events, flag_id, "age_s", age, _PARTIAL_STALE_S,
-                            f"stale partial download {path} ({age:.0f}s old)")
+                            f"stale partial download {path} ({age:.0f}s old)",
+                            details={"path": path, "age_s": age})
             for path in self._active_partials - stale_now:
                 flag_id = f"partial:{path}"
                 self._clear(events, flag_id, "age_s", None, _PARTIAL_STALE_S,
                             f"partial download {path} no longer stale")
             self._active_partials = stale_now
 
-    def _swap_streak_flag(self, events: list[dict], swapouts: float | None) -> None:
+    def _swap_streak_flag(self, events: list[dict], swapouts: float | None, swap_used: float | None) -> None:
         if swapouts is not None and self._prev_swapout is not None and swapouts > self._prev_swapout:
             self._swap_streak += 1
         else:
@@ -1875,7 +1901,8 @@ class Analyzer:
 
         if self._swap_streak >= 3:
             self._raise(events, "swap:streak", "swapouts_bytes", swapouts, 3,
-                        f"swap-outs increased on {self._swap_streak} consecutive polls")
+                        f"swap-outs increased on {self._swap_streak} consecutive polls",
+                        details={"streak": self._swap_streak, "swap_used": swap_used})
         else:
             self._clear(events, "swap:streak", "swapouts_bytes", swapouts, 3,
                         "swap-outs stopped increasing")
@@ -1900,7 +1927,11 @@ class Analyzer:
                 )
             else:
                 message = f"Claude diagnostic report: {report.get('event')}, action {report.get('action') or 'none'}"
-            self._event(events, f"diag:{filename}", "diag_report", report.get("event"), None, message)
+            self._event(events, f"diag:{filename}", "diag_report", report.get("event"), None, message, details={
+                "file": report.get("file", ""), "event": report.get("event"), "writes_mb": writes_mb,
+                "writes_over_s": report.get("writes_over_s"), "limit_kbps": report.get("limit_kbps"),
+                "action": report.get("action"),
+            })
 
 
 # ── §7 JSONL log writer ──
@@ -2070,6 +2101,131 @@ class NotificationSender:
             self._queue.put_nowait(None)
         except queue.Full:
             pass  # daemon worker; it dies with the process
+
+
+# ── Notification policy (Plan 10): flag events → notifications ──
+
+_NOTIFY_EXCLUDED = {"attr:vm?"}
+_CRITICAL_PREFIXES = ("diag:", "budget:", "bundle:", "partial:", "monitor:")
+
+
+def notification_tier(flag_id: str) -> str:
+    return "critical" if flag_id.startswith(_CRITICAL_PREFIXES) else "warning"
+
+
+def _role_display(role: str | None) -> str:
+    return "Total Claude" if role == "total" else (role or "")
+
+
+def _wording(flag_id: str, event: dict, details: dict) -> tuple[str, str]:
+    """§5 wording per flag type; raises KeyError/TypeError on missing/incomplete details."""
+    threshold = event.get("threshold")
+    if flag_id.startswith("cpu:"):
+        role = details["role"]
+        subtitle = f"High CPU — {_role_display(role)}"
+        body1 = f"{details['avg']:.0f}% of one core ({details['window_s']:.0f}s avg) > {threshold:.0f}%"
+        baseline = details["baseline"]
+        baseline_str = f"{baseline:.0f}%" if baseline is not None else "warming"
+        hint = "See ~/Library/Logs/Claude/cowork_vm_swift.log" if role == "vm" else "Idle climb? See TUI role rows"
+        body2 = f"Baseline {baseline_str}. {hint}"
+    elif flag_id.startswith("mem:"):
+        role = details["role"]
+        subtitle = f"Memory growth — {_role_display(role)}"
+        body1 = (f"5-min avg {format_bytes(details['avg'])} > baseline "
+                  f"{format_bytes(details['baseline'])} + {details['growth_pct']:.0f}%")
+        body2 = "Slow-leak pattern; press b in TUI to re-baseline"
+    elif flag_id.startswith("wr:"):
+        role = details["role"]
+        subtitle = f"High disk writes — {_role_display(role)}"
+        body1 = f"{format_bytes(details['avg'])}/s (60s avg) > {format_bytes(threshold)}/s"
+        body2 = "Counts toward macOS 24h budget; --trace-io shows files"
+    elif flag_id == "swap:streak":
+        subtitle = "Sustained swapping"
+        body1 = "Swap-outs up on 3 consecutive polls"
+        body2 = f"Swap used {format_bytes(details['swap_used'])}; check memory rows"
+    elif flag_id.startswith("budget:"):
+        subtitle = f"Write budget {details['pct']:.0f}% — {details['tier_label']} tier"
+        body1 = f"Total Claude wrote {format_bytes(details['written_24h'])} in 24h"
+        body2 = "macOS files a disk-writes .diag report at 100%"
+    elif flag_id == "bundle:growth":
+        subtitle = "VM bundle growth"
+        body1 = f"+{format_bytes(details['growth'])} since start > {format_bytes(threshold)}"
+        body2 = "rootfs.img is never trimmed; check sessiondata.img"
+    elif flag_id == "bundle:rate":
+        subtitle = "VM bundle growing fast"
+        body1 = f"+{format_bytes(details['rate'])} in 10 min > {format_bytes(threshold)}"
+        body2 = "Check ~/Library/Logs/Claude/ for downloads"
+    elif flag_id == "bundle:zst":
+        present = details["present"]
+        subtitle = f"VM download cache {'reappeared' if present else 'removed'}"
+        body1 = f"rootfs.img.zst {'reappeared' if present else 'disappeared'}"
+        body2 = "Reappeared = re-download; see ~/Library/Logs/Claude/"
+    elif flag_id.startswith("partial:"):
+        subtitle = "Stalled VM download"
+        name = Path(details["path"]).name
+        body1 = f"{name} is {_fmt_duration(details['age_s'])} old (> 5 min)"
+        body2 = "Possible re-download loop; see ~/Library/Logs/Claude/"
+    elif flag_id.startswith("diag:"):
+        filename = Path(details["file"]).name
+        subtitle = f"macOS diagnostic: {details['event']}"
+        writes_mb = details.get("writes_mb")
+        if writes_mb is not None:
+            body1 = (f"{writes_mb:.0f}MB in {details['writes_over_s']:.0f}s "
+                      f"(limit {details['limit_kbps']:.2f}KB/s)")
+        else:
+            body1 = f"{details['event']}, action: {details.get('action') or 'none'}"
+        body2 = shorten_middle(f"See /Library/Logs/DiagnosticReports/{filename}", BODY_LINE_MAX)
+    else:
+        raise KeyError(flag_id)
+    return subtitle, f"{body1}\n{body2}"
+
+
+def build_notification(event: dict) -> Notification:
+    """Pure function: flag event -> Notification, per REQUIREMENTS-v2 §5. Falls back to the v1 message
+    (as body line 1) if `details` is missing or incomplete, so a notification is never dropped."""
+    flag_id = event["id"]
+    tier = notification_tier(flag_id)
+    details = event.get("details") or {}
+    try:
+        subtitle, body = _wording(flag_id, event, details)
+    except (KeyError, TypeError):
+        subtitle = flag_id
+        body = event.get("message", "")
+    return Notification(flag_id, tier, NOTIFY_TITLE, subtitle, body)
+
+
+def notification_record(n: Notification, status: str, error: str | None = None) -> dict:
+    record = {
+        "type": "notification", "id": n.flag_id, "tier": n.tier,
+        "title": n.title, "subtitle": n.subtitle, "body": n.body, "status": status,
+    }
+    if error is not None:
+        record["error"] = error
+    return record
+
+
+class NotificationPolicy:
+    """Decides which flag events notify, applying the per-flag cooldown (N-8)."""
+
+    def __init__(self, sender: NotificationSender, cooldown_s: float, clock: Callable[[], float] = time.monotonic):
+        self._sender = sender
+        self._cooldown_s = cooldown_s
+        self._clock = clock
+        self._last_sent: dict[str, float] = {}
+
+    def handle(self, event: dict) -> dict | None:
+        """Sends a notifiable event, or returns a `suppressed_cooldown` log record. None otherwise."""
+        flag_id = event["id"]
+        if event.get("state") not in ("raised", "event") or flag_id in _NOTIFY_EXCLUDED:
+            return None
+        now = self._clock()
+        last = self._last_sent.get(flag_id)
+        notification = build_notification(event)
+        if self._cooldown_s > 0 and last is not None and (now - last) < self._cooldown_s:
+            return notification_record(notification, "suppressed_cooldown")
+        self._last_sent[flag_id] = now
+        self._sender.send(notification)
+        return None
 
 
 def notify_test(backend: Callable[[Notification, bool], None] | None = None) -> int:
@@ -2697,6 +2853,16 @@ def _install_signal_handlers(state: _RunState) -> None:
         signal.signal(signal.SIGUSR1, _on_usr1)
 
 
+def _flush_notifications(sender: NotificationSender | None, log: LogWriter) -> None:
+    """Shutdown: bound how long already-queued flag notifications get to go out and confirm (L-7)."""
+    if sender is None:
+        return
+    sender.flush(timeout=2)
+    for result in sender.drain_results():
+        log.write(notification_record(result.notification, result.status, result.error))
+    sender.close()
+
+
 def run(args: argparse.Namespace) -> int:
     log = LogWriter(args.log)
     collectors = [
@@ -2713,9 +2879,25 @@ def run(args: argparse.Namespace) -> int:
     state = _RunState()
     _install_signal_handlers(state)
 
+    sender: NotificationSender | None = None
+    policy: NotificationPolicy | None = None
+    notify_state = "off"
+    if not args.no_notify:
+        _, pync_error = load_pync()
+        if pync_error is None:
+            sender = NotificationSender()
+            policy = NotificationPolicy(sender, args.notify_cooldown)
+            notify_state = "on"
+        else:
+            notify_state = "unavailable"
+            log.write({
+                "type": "notification", "id": "notify:init", "tier": "critical", "title": NOTIFY_TITLE,
+                "subtitle": "", "body": "", "status": "failed", "error": pync_error,
+            })
+
     log.write({
         "type": "session_start",
-        "config": vars(args),
+        "config": {**vars(args), "notify": not args.no_notify},
         "versions": _collect_versions(),
         "host": _collect_host(),
     })
@@ -2743,6 +2925,13 @@ def run(args: argparse.Namespace) -> int:
             for event in flag_events:
                 log.write({"type": "flag", **event})
                 renderer.on_flag(event)
+                if policy is not None:
+                    suppressed = policy.handle(event)
+                    if suppressed is not None:
+                        log.write(suppressed)
+            if sender is not None:
+                for result in sender.drain_results():
+                    log.write(notification_record(result.notification, result.status, result.error))
             renderer.render(sample, derived, sample["active_flags"])
 
             seq += 1
@@ -2766,6 +2955,7 @@ def run(args: argparse.Namespace) -> int:
         import traceback
 
         log.write({"type": "session_end", "reason": "error", "traceback": traceback.format_exc()})
+        _flush_notifications(sender, log)
         renderer.stop()
         for collector in collectors:
             collector.close()
@@ -2774,6 +2964,7 @@ def run(args: argparse.Namespace) -> int:
     else:
         log.write({"type": "session_end", "reason": reason})
     finally:
+        _flush_notifications(sender, log)
         renderer.stop()
         for collector in collectors:
             collector.close()

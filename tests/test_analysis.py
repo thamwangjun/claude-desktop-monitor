@@ -42,6 +42,12 @@ def cleared_ids(events):
     return {e["id"] for e in events if e["state"] == "cleared"}
 
 
+def by_id(events, flag_id, state="raised"):
+    matches = [e for e in events if e["id"] == flag_id and e["state"] == state]
+    assert matches, f"no {state} event for {flag_id}"
+    return matches[-1]
+
+
 # ── TimeWindow ──
 
 
@@ -98,6 +104,9 @@ def test_cpu_raise_and_clear_with_hysteresis():
         all_events += events
         t += 1
     assert "cpu:total" in raised_ids(all_events)
+    details = by_id(all_events, "cpu:total")["details"]
+    assert details["role"] == "total" and details["window_s"] == 4
+    assert details["avg"] > 30.0 and details["baseline"] == 5.0
 
     # no flap: a single sample at 29% (just under the 30% threshold) must not clear
     # since clear only happens below 0.9*30=27
@@ -159,6 +168,9 @@ def test_memory_growth_flag_above_floor():
         events_all += events
         t += args.interval
     assert "mem:total" in raised_ids(events_all)
+    details = by_id(events_all, "mem:total")["details"]
+    assert details["role"] == "total" and details["baseline"] == baseline_val
+    assert details["avg"] > baseline_val * 1.5 and details["growth_pct"] == 50.0
 
 
 # ── Write-rate flag ──
@@ -176,6 +188,8 @@ def test_write_rate_flag():
         events_all += events
         t += args.interval
     assert "wr:total" in raised_ids(events_all)
+    details = by_id(events_all, "wr:total")["details"]
+    assert details == {"role": "total", "avg": 5 * 10**6}
 
 
 # ── 24h write budget ──
@@ -219,6 +233,10 @@ def test_budget_flag_raises_and_clears():
                                                "write_rate": None, "read_rate": None, "write_delta": big})
     _, events = analyzer.analyze(sample)
     assert "budget:2g" in raised_ids(events)
+    details = by_id(events, "budget:2g")["details"]
+    assert details["tier_label"] == "2 GiB"
+    assert details["written_24h"] == big and details["budget"] == 2 * 2**30
+    assert details["pct"] == big / (2 * 2**30) * 100
 
     sample = base_sample(elapsed=90000.0, total={"cpu_pct": None, "footprint": None, "rss": None,
                                                    "write_rate": None, "read_rate": None, "write_delta": 0})
@@ -255,6 +273,7 @@ def test_bundle_growth_from_absent_start():
     sample = base_sample(elapsed=3.0, bundle=_bundle(5_000_000))
     _, events = analyzer.analyze(sample)
     assert "bundle:growth" in raised_ids(events)
+    assert by_id(events, "bundle:growth")["details"] == {"growth": 5_000_000.0}
 
 
 def test_bundle_growth_present_at_start_uses_first_value_as_baseline():
@@ -277,6 +296,7 @@ def test_bundle_rate_over_window():
     sample = base_sample(elapsed=100.0, bundle=_bundle(3_000_000))
     _, events = analyzer.analyze(sample)
     assert "bundle:rate" in raised_ids(events)
+    assert by_id(events, "bundle:rate")["details"] == {"rate": 2_000_000.0}
 
 
 def test_bundle_zst_toggle_event():
@@ -291,6 +311,7 @@ def test_bundle_zst_toggle_event():
     zst_events = [e for e in events if e["id"] == "bundle:zst"]
     assert len(zst_events) == 1
     assert zst_events[0]["state"] == "event"
+    assert zst_events[0]["details"] == {"present": False}
 
 
 def test_partial_ageing_raises_and_clears():
@@ -300,6 +321,8 @@ def test_partial_ageing_raises_and_clears():
     sample = base_sample(elapsed=0.0, bundle=_bundle(1_000_000, partials=partials))
     _, events = analyzer.analyze(sample)
     assert "partial:vm_bundles/foo.img.partial" in raised_ids(events)
+    details = by_id(events, "partial:vm_bundles/foo.img.partial")["details"]
+    assert details == {"path": "vm_bundles/foo.img.partial", "age_s": 400.0}
 
     sample = base_sample(elapsed=3.0, bundle=_bundle(1_000_000, partials=[]))
     _, events = analyzer.analyze(sample)
@@ -315,10 +338,12 @@ def test_swap_streak_raises_after_three_increases_and_clears_on_flat_poll():
     events_all = []
     values = [100, 200, 300, 400]  # three consecutive increases
     for i, v in enumerate(values):
-        sample = base_sample(elapsed=float(i), swap={"used": None, "swapins_bytes": None, "swapouts_bytes": v})
+        sample = base_sample(elapsed=float(i), swap={"used": 42, "swapins_bytes": None, "swapouts_bytes": v})
         _, events = analyzer.analyze(sample)
         events_all += events
     assert "swap:streak" in raised_ids(events_all)
+    details = by_id(events_all, "swap:streak")["details"]
+    assert details == {"streak": 3, "swap_used": 42}
 
     sample = base_sample(elapsed=4.0, swap={"used": None, "swapins_bytes": None, "swapouts_bytes": 400})
     _, events = analyzer.analyze(sample)
@@ -357,6 +382,12 @@ def test_diag_new_report_emits_event():
     assert len(diag_events) == 1
     assert diag_events[0]["state"] == "event"
     assert diag_events[0]["id"] == "diag:Claude_2026-09-25-213433_nu.diag"
+    details = diag_events[0]["details"]
+    assert details == {
+        "file": "/Library/Logs/DiagnosticReports/Claude_2026-09-25-213433_nu.diag",
+        "event": "disk writes", "writes_mb": 2147.48, "writes_over_s": 1059.0,
+        "limit_kbps": 24.86, "action": "none",
+    }
 
 
 # ── Role appearing late ──
