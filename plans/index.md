@@ -182,19 +182,19 @@ Strictly sequential. 10 and 11 both depend only on 09, but both edit `run()` (§
 
 | Requirement IDs | Plan |
 |---|---|
-| N-1 – N-4, N-13, N-21, N-22/N-23 (detection), E-3, E-7, V-8 | 09 |
-| N-5 – N-12, N-18, N-19, L-7, L-8, V-7, V-9, V-11 | 10 |
-| N-14 – N-17, N-20, N-22 (display), V-10 | 11 |
+| N-1 – N-4, N-13, N-21, N-22/N-23 (detection), N-23 exception (`load_pync`), E-3, E-7, V-8 | 09 |
+| N-5 – N-12, N-18, N-19, N-23 exception (`notify:init` record), L-7, L-8, V-7, V-9, V-11 | 10 |
+| N-14 – N-17, N-20, N-22 (display), N-23 exception (display), L-7 (`dispatched`), V-10 | 11 |
 | §8 deliverables, N-17/N-24 (docs), V-7 – V-12 (full run) | 12 |
 
 ## Plan-level decisions (v2): reviewed with the user 2026-09-26
 
 | Plan | Decision |
 |---|---|
-| 09 | One daemon worker and a bounded queue (64); full queue → `failed`; pync `wait=True` in the worker, no per-send timeout; **eager** `import pync` at startup (failure → notifications unavailable for the session); subtitle ≤ 40 chars, body lines ≤ 60 chars; a PATH `terminal-notifier` takes precedence (pync behaviour) |
-| 10 | `details` payloads per flag type (also in `flag` records); cooldown timestamps at dispatch; `sent`/`failed` logged when the worker reports; fall back to the v1 `message` if `details` is incomplete; unknown prefixes → warning tier; `--notify-cooldown 0` = no cooldown |
-| 11 | v1 `session_end.reason` kept, plus a `signal` field; exit notification is fire-and-forget (`dispatched` status, no wait) and bypasses cooldown and queue; inherited `SIG_IGN` for SIGHUP (nohup) respected; failure warning stays in the header for the session |
-| 12 | V-12 tolerance ±0.5 s per poll over 10 min; results in `12-verification-results.md` |
+| 09 | One daemon worker and a bounded queue (64); full queue → `failed`; pync `wait=True` in the worker, no per-send timeout; **eager** `import pync` at startup (failure → notifications unavailable for the session); subtitle ≤ 40 chars, body lines ≤ 60 chars; a PATH `terminal-notifier` takes precedence (pync behaviour); thumbnail at `assets/claude-icon.png`; `--notify-test` as drafted (exit 0 only if both sent) |
+| 10 | `details` payloads per flag type (also in `flag` records); cooldown timestamps at dispatch; `sent`/`failed` logged when the worker reports; fall back to the v1 `message` if `details` is incomplete; unknown prefixes → warning tier; `--notify-cooldown 0` = no cooldown; shutdown waits up to 2 s for queued flag notifications (every shutdown) |
+| 11 | v1 `session_end.reason` kept, plus a `signal` field; exit notification is fire-and-forget (`dispatched` status, no wait) and bypasses cooldown and queue; inherited `SIG_IGN` for SIGHUP (nohup) respected; failure warning stays in the header for the session; the 2 s flush runs after the exit notification is launched |
+| 12 | V-9/V-12 induced by user-driven CPU spikes (`--cpu-window 6`, threshold idle + 5); V-12 ±0.5 s per poll over 10 min with ≥ 10 sends; results in `12-verification-results.md` |
 
 ## Status (v2)
 

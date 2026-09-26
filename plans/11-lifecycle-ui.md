@@ -30,6 +30,8 @@ Plans 09 and 10 complete.
 | N-18 | `--no-notify` also suppresses the exit notification. |
 | N-20 | TUI header shows `notify: on` / `notify: off`. |
 | N-22 (display) | First notification failure: one warning in the TUI, or one stderr line when headless; later failures only logged. |
+| N-23 (exception, display) | pync import failure at startup: header `notify: off (unavailable: see log)` plus the warning. |
+| L-7 (`dispatched`) | The exit notification's record uses status `dispatched`. |
 
 ## Design
 
@@ -109,9 +111,11 @@ The second header line gains `notify: on` / `notify: off` after `trace-io: …`.
 - The exit notification bypasses the cooldown policy and the worker queue, and is not waited for (`dispatched` status). Reviewed 2026-09-26.
 - A pync import failure at startup shows `notify: off (unavailable: see log)` in the header, plus the warning (the same `on_notify_warning` path).
 
-The other decisions above were reviewed with the user on 2026-09-26 and kept.
 - An inherited `SIG_IGN` for SIGHUP (nohup) is respected.
 - The failure warning stays in the TUI header for the rest of the session.
+- Every shutdown path runs Plan 10's flush of queued flag notifications (up to 2 s) after the exit notification is launched. Reviewed 2026-09-26.
+
+The other decisions above were reviewed with the user on 2026-09-26 and kept.
 
 ## Out of scope
 

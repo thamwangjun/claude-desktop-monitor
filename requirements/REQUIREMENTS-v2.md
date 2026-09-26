@@ -66,7 +66,7 @@ Other facts:
 | N-5 | Notified flag types: `cpu:*`, `mem:*`, `wr:*`, `budget:*`, `bundle:growth`, `bundle:rate`, `bundle:zst`, `partial:*`, `swap:streak`, `diag:*`. **`attr:vm?` does not notify** (tool-internal attribution confidence; stays in the TUI and log). |
 | N-6 | Only the **`raised`** and **`event`** states notify. **`cleared`** does not. |
 | N-7 | **One notification per flag**: flags raised in the same poll are not merged, and per-role flags are not suppressed when the matching `total` flag also fires. |
-| N-8 | **Per-flag cooldown**: after a notification is sent for a flag ID, further `raised`/`event` transitions of the **same flag ID** within `--notify-cooldown` (default **300 s**) are not notified. They are still flagged in the TUI/stderr and logged as `suppressed_cooldown` (L-7). The cooldown is measured from the last *sent* notification for that ID. `diag:<file>` IDs are unique per report, so they are effectively never suppressed. The `b` key (v1 K-4) does **not** reset cooldowns. |
+| N-8 | **Per-flag cooldown**: after a notification is sent for a flag ID, further `raised`/`event` transitions of the **same flag ID** within `--notify-cooldown` (default **300 s**) are not notified. They are still flagged in the TUI/stderr and logged as `suppressed_cooldown` (L-7). The cooldown is measured from when the last notification for that ID was **dispatched** (handed to the sender), not from delivery confirmation. `diag:<file>` IDs are unique per report, so they are effectively never suppressed. The `b` key (v1 K-4) does **not** reset cooldowns. |
 | N-9 | Startup-listed diagnostic reports (v1 X-4) **do not notify**. |
 
 ### 4.3 Content
@@ -87,7 +87,7 @@ Other facts:
 
 | ID | Requirement |
 |---|---|
-| N-14 | Notify (critical tier) when the monitor **exits unexpectedly**: an unhandled exception, or **SIGTERM** / **SIGHUP** (e.g. `kill`, a closed tmux pane or terminal). The body gives the reason and the log path, and warns that alerts have stopped. Not subject to the cooldown. Sent without waiting for confirmation, so shutdown is not delayed. |
+| N-14 | Notify (critical tier) when the monitor **exits unexpectedly**: an unhandled exception, or **SIGTERM** / **SIGHUP** (e.g. `kill`, a closed tmux pane or terminal). The body gives the reason and the log path, and warns that alerts have stopped. Not subject to the cooldown. Launched without waiting for confirmation, before any other shutdown step, so it goes out immediately. Shutdown then waits up to 2 s for flag notifications still queued; normally there are none. |
 | N-15 | A **clean quit** (`q`, Ctrl-C / SIGINT) and monitor **start** do not notify. |
 | N-16 | SIGHUP gets a handler (v1 installs SIGINT and SIGTERM only) so that it performs the same clean shutdown as SIGTERM (flush log, restore terminal) in addition to N-14. SIGTERM continues to shut down cleanly but is now classed as unexpected. |
 | N-17 | SIGKILL and power loss cannot be caught; the README documents this limit. |
@@ -169,10 +169,10 @@ Unit tests use a **mocked sender** (no real notifications). Live checks are done
 |---|---|
 | V-7 | Unit tests: flag → notification mapping (N-5, `attr:vm?` excluded), state filter (N-6), one-per-flag (N-7), cooldown incl. `suppressed_cooldown` logging (N-8), startup diag reports not notified (N-9), tier/sound (N-12, N-13), wording and escaping/truncation (N-4, §5), failure warn-once (N-22, N-23), `notification` records (L-7), `--no-notify`. |
 | V-8 | `uv run monitor.py --notify-test` shows a warning (Glass) and a critical (Basso) notification, each with the Claude thumbnail. |
-| V-9 | Live induced flag (e.g. `--cpu-threshold 1`): the notification appears with correct content; a re-raise within the cooldown is not notified and is logged as `suppressed_cooldown`. |
+| V-9 | Live induced flag via user-driven CPU spikes (`--cpu-window 6`, threshold just above Claude's idle CPU): the notification appears with correct content; a clear then re-raise within the cooldown is not notified and is logged as `suppressed_cooldown`. |
 | V-10 | `kill -TERM <pid>` on a headless run: the unexpected-exit notification appears and the log is flushed. Clean `q` / Ctrl-C: no notification. |
 | V-11 | `--no-notify` run with an induced flag: no notification; the TUI header shows `notify: off`. |
-| V-12 | The sampling cadence is unaffected while notifications are sent (N-3): poll timestamps in the log stay within the configured interval. |
+| V-12 | The sampling cadence is unaffected while notifications are sent (N-3): during a 10-min run with repeated user-driven CPU spikes and `--notify-cooldown 0`, poll timestamps in the log stay within the configured interval. |
 
 ## 10. Decision log (grey areas)
 
@@ -190,8 +190,8 @@ Unit tests use a **mocked sender** (no real notifications). Live checks are done
 | 8 | Modes | TUI + headless; TUI header indicator |
 | 9a | Startup `.diag` reports | Not notified (X-4 unchanged) |
 | 9b | Lifecycle | Unexpected exit only |
-| 10 | Failures | Non-blocking, warn once, keep trying |
-| 11 | Logging | `notification` record with `sent` / `suppressed_cooldown` / `failed` |
+| 10 | Failures | Non-blocking, warn once, keep trying; exception: pync import failure at startup → notifications unavailable for the session |
+| 11 | Logging | `notification` record with `sent` / `suppressed_cooldown` / `failed` / `dispatched` (exit notification only) |
 | 12 | Verification | Mocked-sender unit tests, `--notify-test`, live checks |
 
 ## 11. Relation to v1 requirements

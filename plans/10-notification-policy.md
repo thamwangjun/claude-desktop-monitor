@@ -130,11 +130,12 @@ In `run()`:
 ## Verification (done when)
 
 - [ ] **V-7**: `uv run pytest` passes (v1 + v2 tests).
-- [ ] **V-9** (live, confirmed with the user one step at a time): `uv run monitor.py --cpu-threshold 1 --notify-cooldown 120` with Claude running:
-  1. A `High CPU — …` banner appears (Glass, thumbnail) within ~60 s, worded per §5.
+- [ ] **V-9** (live, confirmed with the user one step at a time). Setup for live cooldown and cadence checks: measure Claude's idle Total CPU first, then run with `--cpu-window 6 --cpu-threshold <idle + 5>`. The user briefly uses Claude (scrolling, typing) to spike CPU above the threshold, then stops so it falls below the 90% clear point. Run `uv run monitor.py --cpu-window 6 --cpu-threshold <idle + 5> --notify-cooldown 120` with Claude running:
+  1. The user spikes CPU: a `High CPU — …` banner appears (Glass, thumbnail) within ~10 s, worded per §5.
   2. The log has matching `flag` (with `details`) and `notification` (`sent`) records.
-  3. After a clear and re-raise within 120 s, no banner appears, and a `suppressed_cooldown` record is logged.
-- [ ] **V-11** (live, confirmed with the user): the same run with `--no-notify` shows no banners and writes no `notification` records.
+  3. The user stops, and the flag clears (a `flag` `cleared` record). The user spikes again within 120 s of the first banner: no banner appears, and a `suppressed_cooldown` record is logged.
+  4. After 120 s have passed, one more spike produces a banner again.
+- [ ] **V-11** (live, confirmed with the user): the same setup with `--no-notify` and one spike shows no banners and writes no `notification` records.
 - [ ] Committed, message prefixed `plan 10:`.
 
 ## Plan-level decisions (not specified in REQUIREMENTS-v2)

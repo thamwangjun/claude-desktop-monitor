@@ -48,10 +48,10 @@ Every live check is done **one at a time and confirmed with the user** before th
 |---|---|
 | V-7 | `uv run pytest`: all v1 and v2 tests pass. |
 | V-8 | `uv run monitor.py --notify-test`: warning (Glass) and critical (Basso) banners with the Claude thumbnail; exit 0. |
-| V-9 | `--cpu-threshold 1 --notify-cooldown 120`: a banner worded per §5; `flag.details` and `notification: sent` records; re-raise within 120 s → `suppressed_cooldown`, no banner. |
+| V-9 | User-driven CPU spikes (setup as in Plan 10: measure idle, `--cpu-window 6 --cpu-threshold <idle + 5> --notify-cooldown 120`): a banner worded per §5; `flag.details` and `notification: sent` records; clear, then re-spike within 120 s → `suppressed_cooldown`, no banner; after 120 s → banner again. |
 | V-10 | Headless `kill -TERM` → SIGTERM exit banner and a complete log. TUI in tmux, pane killed → SIGHUP banner. `q` and Ctrl-C → no banner. |
 | V-11 | `--no-notify`: no banners, no `notification` records, header `notify: off`. |
-| V-12 | Cadence (N-3): run headless for 10 min with `--cpu-threshold 1 --write-threshold 1 --notify-cooldown 0` (many sends). Every `sample` record's `elapsed` step is within `interval ± 0.5 s`. Checked with a short `jq`/Python script over the log, which is recorded in the results. |
+| V-12 | Cadence (N-3): run headless for 10 min with `--cpu-window 6 --cpu-threshold <idle + 5> --notify-cooldown 0` while the user spikes and releases Claude's CPU repeatedly (each spike raises and notifies). Every `sample` record's `elapsed` step is within `interval ± 0.5 s`, and the log shows ≥ 10 `sent` records. Checked with a short `jq`/Python script over the log, which is recorded in the results. |
 
 Results are recorded in `plans/12-verification-results.md` in the Plan 08 format (machine, versions, date, pass/fail per check, evidence excerpts).
 
@@ -69,7 +69,8 @@ Results are recorded in `plans/12-verification-results.md` in the Plan 08 format
 
 ## Plan-level decisions (not specified in REQUIREMENTS-v2)
 
-- The V-12 tolerance is ±0.5 s per poll step, over a 10-minute run with notifications forced frequent.
+- The V-12 tolerance is ±0.5 s per poll step, over a 10-minute run with at least 10 notifications sent.
+- V-9 and V-12 induce flags with user-driven CPU spikes (short CPU window, threshold just above idle). Reviewed 2026-09-26.
 - Results go in a separate file, as in Plan 08.
 
 ## Out of scope

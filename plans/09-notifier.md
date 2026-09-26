@@ -48,7 +48,7 @@ A new `monitor.py` section, `# ── §7a Notifications ──`, between §7 (J
 class Notification:
     flag_id: str          # e.g. "cpu:renderer", "diag:<file>", "monitor:exit", "test:warning"
     tier: str             # "critical" | "warning"
-    title: str            # always "Claude Monitor" except --notify-test
+    title: str            # always "Claude Monitor"
     subtitle: str
     body: str             # up to 2 lines joined with "\n"
 
@@ -72,7 +72,8 @@ class SendResult:
 
 ```python
 class NotificationSender:
-    def __init__(self, backend: Callable[[Notification], None] | None = None, max_queue: int = 64): ...
+    def __init__(self, backend: Callable[[Notification, bool], None] | None = None, max_queue: int = 64): ...
+        # backend(notification, wait): wait=True from the worker, wait=False from fire_and_forget
     def send(self, n: Notification) -> None       # non-blocking enqueue
     def drain_results(self) -> list[SendResult]   # called by the main thread each poll
     def flush(self, timeout: float) -> None       # wait up to timeout for the queue to empty (shutdown, --notify-test)
@@ -87,12 +88,12 @@ class NotificationSender:
   2. `pync.Notifier.notify(escaped_body, title=…, subtitle=…, sound=TIER_SOUNDS[tier], contentImage=str(NOTIFY_ICON) if it exists, wait=True)`.
   3. Any exception → `failed` with `error=f"{type(e).__name__}: {e}"`.
 - `first_failure` is set on the first failed result of the session only; the sender tracks this so Plans 10 and 11 need no extra state.
-- `fire_and_forget(n)` calls `pync.Notifier.notify(…, wait=False)` directly on the calling thread: it launches terminal-notifier and returns without waiting, bypassing the queue (which may be busy or stuck). The child process completes even if the monitor exits. Used only for the unexpected-exit notification (Plan 11).
+- Tests inject a fake backend (records calls and the `wait` argument, can raise or sleep).
+- `fire_and_forget(n)` calls the backend with `wait=False` (the default backend: `pync.Notifier.notify(…, wait=False)`) directly on the calling thread: it launches terminal-notifier and returns without waiting, bypassing the queue (which may be busy or stuck). The child process completes even if the monitor exits. Used only for the unexpected-exit notification (Plan 11).
 
 ### Loading pync
 
 `load_pync() -> tuple[module | None, str | None]` does `import pync` inside `try` and returns `(module, None)` or `(None, "<ExceptionType>: <message>")`. It is called **once at startup, only when notifications are enabled** (Plan 10 wires it into `run()`; `--notify-test` calls it too). On failure, notifications are **off for the session**, with one warning and a log record (Plans 10 and 11). This is the one case where notifications are disabled automatically: nothing could be sent. It clarifies N-23, which is about individual send failures. With `--no-notify`, pync is never imported.
-- Tests inject a fake backend (records calls, can raise or sleep).
 
 ### Thumbnail asset (N-2, E-7)
 
