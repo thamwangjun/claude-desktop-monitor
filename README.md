@@ -30,7 +30,7 @@ GPL-3.0-only — see [`LICENSE`](LICENSE).
 Tested on Apple M5 (Mac17,4), macOS 26.7 (25G229), Claude Desktop 2.9939.2.
 
 ```
-mise install                 # Python 3.14.7, uv 0.12.19 (pinned in mise.toml)
+mise install                 # Python 3.14.7, uv 0.12.19, Rust 1.98.1 (pinned in mise.toml)
 uv sync                      # create/refresh .venv from uv.lock
 uv run claude-desktop-monitor            # live TUI
 uv run claude-desktop-monitor --no-tui   # headless, e.g. under nohup or tmux for overnight runs
@@ -38,6 +38,8 @@ python -m claude_desktop_monitor         # equivalent to `uv run claude-desktop-
 uv run pytest                            # full test suite
 # or: mise run monitor       # alias for `uv run claude-desktop-monitor`
 ```
+
+`mise install` also installs Rust; only the packaging team needs it, to build `uv_build` (the build backend) from source the way Homebrew does, since Homebrew's build environment doesn't see mise-managed tools. `uv sync` and `uv run` use `uv_build`'s prebuilt wheel and never touch Rust.
 
 Runtime dependencies are `psutil`, `rich`, `watchdog` and `pync` (for notifications; `uv sync` builds it from source — it ships no wheel); everything else is the standard library. `psutil.Process.io_counters()` isn't available on macOS, so process I/O comes from a `ctypes` call instead (`proc_pid_rusage`) — see [Known limitations](#known-limitations).
 

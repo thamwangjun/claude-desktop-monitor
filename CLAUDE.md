@@ -6,12 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 One module, `src/claude_desktop_monitor/monitor.py`: a macOS-only terminal tool that watches Claude Desktop's resource usage over time (especially the Cowork Linux VM), logs JSONL, raises flags against fixed rules, sends macOS notifications, and shows a `rich` TUI or runs headless. **Observability only.**
 
-`PLAN_EXEC_INSTRUCTIONS.md` is the full working guide (verified technical facts, hard rules, git rules, user-only checks). Read it before non-trivial changes. Docs by authority: `requirements/REQUIREMENTS-v1.md` → `REQUIREMENTS-v2.md` → `REQUIREMENTS-v3.md` (each later version wins where it amends an earlier one) → `plans/index.md` (status table, conventions) → `plans/NN-*.md`. If a plan conflicts with the requirements, stop and ask the user. v1 (plans 01–08) and v2 (09–12) are done; v3 (13–17, Homebrew distribution) is in progress: 13 (package conversion) and 14 (runtime changes) are done, 15–17 are not started. The default log location is now `~/Library/Logs/claude-desktop-monitor/` (its own directory, separate from and unrelated to the read-only `~/Library/Logs/Claude/` below), `session_start.versions.monitor` reports the installed package version, and the package version is 0.3.0.
+`PLAN_EXEC_INSTRUCTIONS.md` is the full working guide (verified technical facts, hard rules, git rules, user-only checks). Read it before non-trivial changes. Docs by authority: `requirements/REQUIREMENTS-v1.md` → `REQUIREMENTS-v2.md` → `REQUIREMENTS-v3.md` (each later version wins where it amends an earlier one) → `plans/index.md` (status table, conventions) → `plans/NN-*.md`. If a plan conflicts with the requirements, stop and ask the user. v1 (plans 01–08) and v2 (09–12) are done; v3 (13–17, Homebrew distribution) is in progress: 13 (package conversion), 14 (runtime changes), 15 (README/release) and 16 (formula/tap CI) are done — the tap `thamwangjun/homebrew-tap` (cloned at `../homebrew-tap`) has a formula PR open with green CI and a bottle built from source — 17 (publish, verification) is not started. The default log location is `~/Library/Logs/claude-desktop-monitor/` (its own directory, separate from and unrelated to the read-only `~/Library/Logs/Claude/` below), `session_start.versions.monitor` reports the installed package version, and the package version is 0.3.0.
 
 ## Commands
 
 ```
-mise install                          # Python 3.14.7, uv 0.12.19 (mise.toml)
+mise install                          # Python 3.14.7, uv 0.12.19, Rust 1.98.1 (mise.toml)
 uv sync                               # .venv from uv.lock; never pip install
 uv run claude-desktop-monitor                     # TUI
 uv run claude-desktop-monitor --no-tui            # headless (also automatic when stdout isn't a TTY)

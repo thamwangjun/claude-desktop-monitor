@@ -16,7 +16,7 @@ The tool samples processes, disk footprint, swap and macOS diagnostic reports ev
 
 **v2** (plans 09–12) adds **macOS notifications**: when a flag is raised or an event fires, and when the monitor itself exits unexpectedly. They are sent via pync / terminal-notifier, with the Claude logo as a thumbnail.
 
-**v3** (plans 13–17) distributes it through **Homebrew**: the script becomes the package `claude_desktop_monitor` (`src/` layout, `uv_build`; done in Plan 13), logs default to `~/Library/Logs/claude-desktop-monitor/` (Plan 14, not yet done), and a personal tap (`thamwangjun/homebrew-tap`, cloned at `../homebrew-tap`) ships an arm64 macOS 26 bottle (Plans 16–17). Monitoring behaviour is unchanged. Until plans 14 and 16 are done, §4–§6 below describe the pre-14/pre-16 code; each of those plans updates them for its own change.
+**v3** (plans 13–17) distributes it through **Homebrew**: the script becomes the package `claude_desktop_monitor` (`src/` layout, `uv_build`; done in Plan 13), logs default to `~/Library/Logs/claude-desktop-monitor/` (done in Plan 14), and a personal tap (`thamwangjun/homebrew-tap`, cloned at `../homebrew-tap`) ships an arm64 macOS 26 bottle. The formula and tap CI are done (Plan 16: `Formula/claude-desktop-monitor.rb` on branch `claude-desktop-monitor-0.3.0`, PR #1, CI green with a bottle built from source); only publishing that bottle and installing from the tap (Plan 17) remain. Monitoring behaviour is unchanged.
 
 It is observability only (see §7 Hard rules).
 
@@ -35,7 +35,7 @@ If a plan and the requirements conflict, the requirements win (the later version
 Plans:
 - **v1:** `01-scaffold`, `02-native-layer`, `03-processes`, `04-disk-footprint`, `05-system-signals`, `06-analysis-alerts`, `07-tui`, `08-readme-verification`. Default order is 01 → 08. Plans 02, 04 and 05 each depend only on 01. All are done.
 - **v2:** `09-notifier`, `10-notification-policy`, `11-lifecycle-ui`, `12-readme-verification`. **Strictly sequential**, 09 → 12: 10 and 11 both edit `run()` and the shutdown path. All are done.
-- **v3:** `13-package-conversion`, `14-runtime-changes`, `15-readme-release`, `16-formula-tap`, `17-v3-verification`. **Strictly sequential**, 13 → 17. Plans 15, 16 and 17 each end at a **user gate** (tag, PR, publish); the next plan can't start before it. 13 and 14 are done; 15–17 are not started.
+- **v3:** `13-package-conversion`, `14-runtime-changes`, `15-readme-release`, `16-formula-tap`, `17-v3-verification`. **Strictly sequential**, 13 → 17. Plans 15, 16 and 17 each end at a **user gate** (tag, PR, publish); the next plan can't start before it. 13, 14, 15 and 16 are done; 17 is not started.
 
 ## 3. How to execute a plan (every session)
 
@@ -62,7 +62,7 @@ Checks that need the user are listed in §9. Ask the user to do those; don't wor
 | Machine | Apple M5 (Mac17,4), 10 CPUs, 32 GB RAM, macOS 26.7 (25G229) |
 | User shell | fish. Commands in the Bash tool run fine; when giving the user commands to type, keep them POSIX-simple or fish-compatible. |
 | Tool manager | mise 2026.9.11 (globally: Python 3.14.6, uv 0.11.28) |
-| Project pins | `mise.toml`: **Python 3.14.7**, **uv 0.12.19**. Run `mise install` in the repo if missing. |
+| Project pins | `mise.toml`: **Python 3.14.7**, **uv 0.12.19**, **Rust 1.98.1** (Plan 16, `mise exec -- rustc --version`; only V-19's from-source check needs it — `uv sync`/`uv build` use `uv_build`'s wheel). Run `mise install` in the repo if missing. |
 | Python env | uv project, `src/` layout: `pyproject.toml` (build backend `uv_build`) + committed `uv.lock`, `uv sync` (installs the package editable), run with `uv run claude-desktop-monitor` or `python -m claude_desktop_monitor`. Never use `pip install` into system or Homebrew Python (PEP 668). |
 | Runtime deps | `psutil`, `rich`, `watchdog`, and from Plan 09 **`pync`** (which pulls in `python-dateutil`; pync 2.0.3 is an sdist, which `uv sync` builds). Dev only: `pytest` (`[dependency-groups] dev`). Nothing else without asking. |
 | Claude Desktop | `/Applications/Claude.app`, version 2.9939.2, bundle ID `com.anthropic.claudefordesktop`. Cowork VM downloaded. |
@@ -179,7 +179,7 @@ Processes that match a naive "claude" name search but are **not** Claude Desktop
   - `sender=com.anthropic.claudefordesktop` shows nothing.
   - A custom `osacompile` applet never registered.
 - terminal-notifier treats a message starting with `-` or `[` specially; escape it.
-- pync's vendored `terminal-notifier.app` 2.0.0 is **x86_64 only** (runs under Rosetta; macOS 26 warns about Intel components). The machine uses **Homebrew terminal-notifier 3.1.0** instead: a bash wrapper exec'ing a native arm64 `terminal-notifier.app`, same bundle ID `fr.julienxx.oss.terminal-notifier`, ad-hoc signed, min macOS 26. It supports `-message/-title/-subtitle/-sound/-contentImage`, drops `-appIcon`/`-sender`, adds `-diagnose`. pync's `Notifier.bin_path` is a `bytes` path when found via PATH (works with `Popen`).
+- pync's vendored `terminal-notifier.app` 2.0.0 is **x86_64 only** (runs under Rosetta; macOS 26 warns about Intel components). The machine uses **Homebrew terminal-notifier 3.1.0** instead: a bash wrapper exec'ing a native arm64 `terminal-notifier.app`, same bundle ID `fr.julienxx.oss.terminal-notifier`, ad-hoc signed, min macOS 26. It supports `-message/-title/-subtitle/-sound/-contentImage`, drops `-appIcon`/`-sender`, adds `-diagnose`. pync's `Notifier.bin_path` is a `bytes` path when found via PATH (works with `Popen`). This vendored x86_64 binary also lands in `libexec` when the Homebrew formula installs `pync`'s sdist; the formula's `install` (Plan 16) removes it after `virtualenv_install_with_resources`, since Homebrew's `brew audit --new` flags non-native binaries in the prefix and the formula's own PATH wrapper (B-5) means it's never reached at runtime anyway.
 - Notifications disabled in System Settings, Focus and Do Not Disturb produce **no error**; only a launch failure or non-zero exit is detectable.
 - Claude's icon: `/Applications/Claude.app/Contents/Resources/electron.icns`. The thumbnail is committed as `assets/claude-icon.png` (`sips -s format png -Z 256 …`).
 - Sounds: `Basso` (critical), `Glass` (warning).
@@ -207,7 +207,9 @@ Default `--log` destination, with no `--log` given, is `~/Library/Logs/claude-de
 - **Homebrew (v3):**
   - Never install Homebrew's `rust` on this machine, so never `brew install` the formula locally before its bottle is published (it would build from source). Local Rust comes from mise (plan 16).
   - Homebrew developer commands (`tap-new`, `style`, `audit`, `update-python-resources`, `test-bot`) switch **developer mode** on. Switch it off (`brew developer off`) before the session ends, and check with `brew developer`.
-  - Don't change other Homebrew state beyond what the plan lists (its scratch and dev taps).
+  - Don't change other Homebrew state beyond what the plan lists (its scratch and dev taps). `brew tap`/`brew style`/`brew audit` may trigger a routine Homebrew self-update (brew itself, `homebrew/core`, `homebrew/cask`) as a side effect; that's normal background behaviour, not something to avoid, but don't take further action on it beyond what the plan needs.
+  - A freshly-tapped personal tap is **untrusted** by default (Homebrew 7.x); `brew style`/`brew audit` still lint it, but `brew install`/CI need it trusted or bottled from the tap's own CI. Don't `brew install` locally anyway (previous bullet).
+  - `brew audit --new` (run by tap CI's `test-bot` after an actual install, unlike a bare local `brew audit`) checks the *installed* prefix, e.g. it flags non-native (x86_64) binaries under `libexec` — a local `brew audit --strict --online` without `--new` won't catch this class of issue.
 
 ## 8. Git
 
