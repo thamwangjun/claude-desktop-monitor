@@ -6,7 +6,22 @@ The tool samples processes, disk footprint, swap and macOS diagnostic reports ev
 
 **This is observability only.** It never modifies, deletes or moves anything under Claude's support directory, its logs, or `/Library/Logs/DiagnosticReports/`. It never kills or restarts Claude Desktop, its VM, or Docker. It never reverse-engineers or modifies Claude Desktop or its VM.
 
-## Requirements
+## Install
+
+```
+brew install thamwangjun/tap/claude-desktop-monitor
+claude-desktop-monitor
+```
+
+Requires macOS 26+ (Homebrew's `terminal-notifier` 3.1.0, a runtime dependency, needs it) and [Claude Desktop](https://claude.ai/download) installed. Apple Silicon Macs get a prebuilt bottle; other Macs build from source, and Homebrew installs Rust temporarily as a build dependency to do that.
+
+Upgrade with `brew upgrade claude-desktop-monitor`, remove with `brew uninstall claude-desktop-monitor`. Either way, logs stay in `~/Library/Logs/claude-desktop-monitor/` — Homebrew doesn't touch them.
+
+## License
+
+GPL-3.0-only — see [`LICENSE`](LICENSE).
+
+## Developer setup
 
 - macOS (uses `ctypes` calls into `libSystem.B.dylib` and private-but-stable Apple APIs).
 - [Claude Desktop](https://claude.ai/download) installed, in `/Applications` or `~/Applications`.
@@ -14,13 +29,13 @@ The tool samples processes, disk footprint, swap and macOS diagnostic reports ev
 
 Tested on Apple M5 (Mac17,4), macOS 26.7 (25G229), Claude Desktop 2.9939.2.
 
-## Install and run
-
 ```
-mise install                 # Python 3.14.7, uv 0.12.18 (pinned in mise.toml)
+mise install                 # Python 3.14.7, uv 0.12.19 (pinned in mise.toml)
 uv sync                      # create/refresh .venv from uv.lock
 uv run claude-desktop-monitor            # live TUI
 uv run claude-desktop-monitor --no-tui   # headless, e.g. under nohup or tmux for overnight runs
+python -m claude_desktop_monitor         # equivalent to `uv run claude-desktop-monitor`, without the console script
+uv run pytest                            # full test suite
 # or: mise run monitor       # alias for `uv run claude-desktop-monitor`
 ```
 
@@ -141,9 +156,9 @@ Only the **raised** and **event** transitions notify; a flag **clearing** never 
 
 **Setup and troubleshooting** — if you never see a banner:
 
-1. Run `uv run claude-desktop-monitor --notify-test` once. The *first* notification any app sends is what makes it appear in **System Settings → Notifications** at all; find **terminal-notifier** there and make sure it's allowed, with the Banners or Alerts style (not "None").
+1. Run `claude-desktop-monitor --notify-test` (or `uv run claude-desktop-monitor --notify-test` in a dev checkout) once. The *first* notification any app sends is what makes it appear in **System Settings → Notifications** at all; find **terminal-notifier** there and make sure it's allowed, with the Banners or Alerts style (not "None").
 2. Focus modes and Do Not Disturb suppress banners **silently** — macOS reports no error, and the monitor can't detect this. If `--notify-test` reports both sends as `sent` but nothing appeared, check Focus/Do Not Disturb.
-3. On Apple Silicon, install Homebrew's `terminal-notifier` (`brew install terminal-notifier`): pync prefers whatever's on `PATH`, and its own bundled copy is Intel-only (2.0.0, runs under Rosetta, and macOS shows a one-time "uses Intel components" warning). Homebrew's 3.1.0 is native arm64. Without `/opt/homebrew/bin` on `PATH`, the bundled copy is used instead.
+3. A Homebrew install already depends on Homebrew's `terminal-notifier` and the installed command's wrapper always puts it first on `PATH`, so this only matters for a dev checkout: install Homebrew's `terminal-notifier` (`brew install terminal-notifier`) there too. Without it, pync falls back to its own vendored copy, which is Intel-only (2.0.0, runs under Rosetta, and macOS shows a one-time "uses Intel components" warning); Homebrew's 3.1.0 is native arm64.
 4. `terminal-notifier -diagnose` (Homebrew 3.1.0) reports why notifications may not be appearing.
 5. The banner's main icon is terminal-notifier's own — macOS only takes the main notification icon from the sending app's own signed bundle, and the project's Python interpreter isn't one (see [Known limitations](#known-limitations)). The Claude logo appears instead as a *thumbnail* image alongside it (`contentImage`, from the committed `assets/claude-icon.png`).
 
@@ -159,7 +174,7 @@ A failed send (the notifier couldn't launch, or exited non-zero) is logged every
 
 ## Reviewing a session log
 
-Each line in the JSONL log is one record with a `type` field: `session_start` (config — including `notify`/`notify_cooldown` — dependency and host versions), `sample` (one poll: `claude`, `processes`, `roles`, `total`, optionally `cli` and `trace_io`, `paths`, `bundle`, `swap`, `diag`, `derived`, `active_flags`), `flag` (`raised`/`cleared`/`event`, with `id`, `value`, `threshold`, `message`, and optionally `details` — the structured values a notification's wording was built from), `marker` (a `label`), `diag_report` (one parsed `.diag` file), `notification` (a sent, suppressed or failed notification: `id`, `tier`, `title`, `subtitle`, `body`, `status` = `sent`/`suppressed_cooldown`/`failed`/`dispatched`), and `session_end` (`reason`: `quit`, `error`, or `signal`, plus `signal` naming which one — e.g. `SIGTERM`, `SIGHUP`, `SIGINT` — when `reason` is `signal`). Every record has `ts` (ISO-8601 with timezone) and `elapsed` (monotonic seconds since session start).
+Each line in the JSONL log is one record with a `type` field: `session_start` (config — including `notify`/`notify_cooldown` — dependency and host versions, including `versions.monitor`, the installed package version), `sample` (one poll: `claude`, `processes`, `roles`, `total`, optionally `cli` and `trace_io`, `paths`, `bundle`, `swap`, `diag`, `derived`, `active_flags`), `flag` (`raised`/`cleared`/`event`, with `id`, `value`, `threshold`, `message`, and optionally `details` — the structured values a notification's wording was built from), `marker` (a `label`), `diag_report` (one parsed `.diag` file), `notification` (a sent, suppressed or failed notification: `id`, `tier`, `title`, `subtitle`, `body`, `status` = `sent`/`suppressed_cooldown`/`failed`/`dispatched`), and `session_end` (`reason`: `quit`, `error`, or `signal`, plus `signal` naming which one — e.g. `SIGTERM`, `SIGHUP`, `SIGINT` — when `reason` is `signal`). Every record has `ts` (ISO-8601 with timezone) and `elapsed` (monotonic seconds since session start).
 
 Flags timeline:
 
