@@ -139,3 +139,68 @@ Planning probes changed requirements/REQUIREMENTS-v1.md in two places. Both are 
 | 06 | Done (4961a13) — deviations, both in §9 (Plan 01's section): `run()` now sets `sample["elapsed"]` before calling `analyzer.analyze()` (the analyzer needs a stable per-sample time reference for its rolling windows, and the sample dict had no such field until `LogWriter` added one afterwards); `run()` now takes `sample["active_flags"]` from the new `Analyzer.active_flags` property (the full current set of raised state flags) instead of rebuilding it from that tick's `flag_events` (which only ever held flags that changed state on that exact poll — a pre-existing gap in the Plan 01 scaffold, not a Plan 06 regression). `Analyzer.__init__` now takes `args` instead of being a no-arg stub. Live-verified: 12 min headless idle run showed `derived` on every sample and no flags; `--cpu-threshold 1 --cpu-window 9` raised `cpu:total` in ~9s; `--write-threshold 1KB` raised `wr:total`/`wr:main`. Not yet live-verified: `--bundle-rate` during a live Cowork task growing `sessiondata.img` (needs the user, per §9). |
 | 07 | Done (24e3c06) — deviations, both in §6 (Plan 06's `Analyzer`, needed by the TUI's own data contract since neither field existed anywhere in `derived`): added `derived["swap_streak"]` (the consecutive-increase counter that drives the `swap:streak` flag, previously internal-only) and `derived[f"wrsum:{suffix}"]` (cumulative bytes written per role/total since session start, needed for the I/O panel's "Written this session" column — Analyzer only tracked write *rate* series before). Per §9 (Plan 01's `run()`): `poll_keys()`'s return value is now captured and acted on (`q`→stop, `b`→`analyzer.reset()` + marker, `m`→marker with the renderer's prompted label) since the Plan 01 scaffold discarded it. Live-verified: headless smoke run against the real running Claude Desktop confirms both new derived fields populate correctly (`wrsum:total`, `swap_streak`); rendered the real dashboard (via `Console(record=True)`) at 200- and 80-column widths — all panels populate, roles/paths/bundle rows match `du`-equivalent sizes, absent paths show `absent`, the two-column layout activates at ≥160 cols and stacks at 80, and the cropped-terminal note appears with a computed row count at 80×24. Simulated `q`/`b`/`m` through `run()` with a stub renderer: `q` ends the session with reason `quit`, `b` and `m` each write the expected `marker` record. Not yet live-verified (needs a real terminal + user, per §9 of CLAUDE.md): actual keypresses in a live TTY, the `m` prompt's terminal pause/resume, `p` PID-view toggle by eye, terminal restoration after `q`/SIGTERM/an injected exception, and `--cpu-threshold` flagging turning a row red on screen. |
 | 08 | Done (pending commit) — deviation: the #51913 citation-gate question was put to the user, who chose to keep it description-only (no link), per the plan's default. All of V-1 to V-6, the fresh-clone check and `uv run pytest` passed live against the reference machine (Claude Desktop 2.9939.2 and Docker Desktop both running); results in `plans/08-verification-results.md`. Two live-induced findings during verification, not scope bugs: V-1's first attempted run (kept in the results file for reference) had no Cowork task or markers and was redone; V-4's ad-hoc watcher script used to send a second `SIGUSR1` marker and stop the run at ~1 h had a bug (`ps -o etimes=` unreliable in this shell) and never fired — the run itself was unaffected and had already exceeded 1 h by the time this was noticed, so the second marker and `SIGTERM` were sent manually instead. |
+
+---
+
+# v2: macOS notifications (plans 09–12)
+
+Requirements: [`../requirements/REQUIREMENTS-v2.md`](../requirements/REQUIREMENTS-v2.md), incremental on v1. v2 sends macOS notifications (via pync / terminal-notifier, with the Claude logo as a thumbnail) when flags are raised or events fire, and when the monitor itself exits unexpectedly.
+
+## The plans
+
+| # | Plan | Delivers | Checkpoint (done when) |
+|---|---|---|---|
+| 09 | [Notifier: delivery layer](09-notifier.md) | `pync` dependency, `assets/claude-icon.png`, `NotificationSender` (non-blocking worker, escaping and truncation, tier sounds, thumbnail, failure detection), `--notify-test` | Unit tests with a fake backend; V-8 banners confirmed |
+| 10 | [Notification policy](10-notification-policy.md) | `details` on flag events; flag → notification mapping, tiers, §5 wording, per-flag cooldown, `--no-notify`, `--notify-cooldown`, `notification` log record; wired into the poll loop | V-7 unit tests; V-9 live flag and cooldown; V-11 `--no-notify` |
+| 11 | [Lifecycle and UI integration](11-lifecycle-ui.md) | Unexpected-exit notification (exception, SIGTERM, SIGHUP), SIGHUP handler, `notify: on/off` in the TUI header, warn-once display | V-10 kill/hang-up/quit checks; header check |
+| 12 | [README and v2 verification](12-readme-verification.md) | README Notifications section and troubleshooting; V-7 to V-12 recorded | All results recorded and passing |
+
+## Order and dependencies
+
+```
+09 Notifier ──> 10 Policy ──> 11 Lifecycle & UI ──> 12 README & verification
+```
+
+Strictly sequential. 10 and 11 both depend only on 09, but both edit `run()` (§9) and its shutdown path, so running them in parallel would conflict. The per-plan workflow, conventions and checkpointing rules from v1 (above) apply unchanged.
+
+**Live checks** (V-8 to V-11) produce real notifications and are done one at a time, each confirmed with the user before the next.
+
+## Why the work is split this way
+
+1. **Mechanism separate from policy.** 09 only delivers a ready-made notification; 10 decides which flags notify and with what text. The policy is then fully unit-testable with a fake sender, and only 09's `--notify-test` needs a real Mac.
+2. **Process-level risk isolated.** 11 changes signal handling, exception paths and shutdown order: behaviour that is tested differently (`kill`, closing a tmux pane) and can leave a terminal broken if wrong. Keeping it out of 10 keeps both checkpoints small.
+3. **Every plan ends runnable.** After 09 the tool can send a test notification; after 10 flags notify; after 11 silent death is covered; 12 documents and verifies.
+
+## Shared conventions added in v2
+
+- **Section layout:** new §7a Notifications (between §7 log writer and §8 renderers).
+- **Contracts:** flag events gain an optional `details` dict (additive). Renderers gain `on_notify_warning(message)`.
+- **Log:** new record type `notification`; `session_start` gains `notify`; `session_end` gains `signal`.
+- **Threads:** notifications are delivered by one worker thread; the LogWriter is only ever called from the main thread.
+
+## Requirement traceability
+
+| Requirement IDs | Plan |
+|---|---|
+| N-1 – N-4, N-13, N-21, N-22/N-23 (detection), E-3, E-7, V-8 | 09 |
+| N-5 – N-12, N-18, N-19, L-7, L-8, V-7, V-9, V-11 | 10 |
+| N-14 – N-17, N-20, N-22 (display), V-10 | 11 |
+| §8 deliverables, N-17/N-24 (docs), V-7 – V-12 (full run) | 12 |
+
+## Plan-level decisions (v2): reviewed with the user 2026-09-26
+
+| Plan | Decision |
+|---|---|
+| 09 | One daemon worker and a bounded queue (64); full queue → `failed`; pync `wait=True` in the worker, no per-send timeout; **eager** `import pync` at startup (failure → notifications unavailable for the session); subtitle ≤ 40 chars, body lines ≤ 60 chars; a PATH `terminal-notifier` takes precedence (pync behaviour) |
+| 10 | `details` payloads per flag type (also in `flag` records); cooldown timestamps at dispatch; `sent`/`failed` logged when the worker reports; fall back to the v1 `message` if `details` is incomplete; unknown prefixes → warning tier; `--notify-cooldown 0` = no cooldown |
+| 11 | v1 `session_end.reason` kept, plus a `signal` field; exit notification is fire-and-forget (`dispatched` status, no wait) and bypasses cooldown and queue; inherited `SIG_IGN` for SIGHUP (nohup) respected; failure warning stays in the header for the session |
+| 12 | V-12 tolerance ±0.5 s per poll over 10 min; results in `12-verification-results.md` |
+
+## Status (v2)
+
+| Plan | Status |
+|---|---|
+| 09 | Not started |
+| 10 | Not started |
+| 11 | Not started |
+| 12 | Not started |

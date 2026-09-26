@@ -57,13 +57,13 @@ Other facts:
 | N-1 | Notifications are sent via **pync** (bundled terminal-notifier). No fallback mechanism. |
 | N-2 | Every notification attaches **Claude's app icon as `contentImage`** (thumbnail), from a **committed PNG** `assets/claude-icon.png` (256 px, generated once from `/Applications/Claude.app/Contents/Resources/electron.icns` with `sips`). No runtime dependency on Claude.app. If the file is missing, the notification is sent without an image. |
 | N-3 | Sending **never blocks the poll loop**. A slow or hung notifier must not delay sampling. |
-| N-4 | Title, subtitle and body text are escaped per terminal-notifier's rules (leading `-` / `[`), and truncated to fit a banner (body ≤ 2 short lines; long paths shortened in the middle). |
+| N-4 | Title, subtitle and body text are escaped per terminal-notifier's rules (leading `-` / `[`), and truncated to fit a banner: subtitle ≤ 40 chars, body ≤ 2 lines of ≤ 60 chars; long paths shortened in the middle. |
 
 ### 4.2 What notifies
 
 | ID | Requirement |
 |---|---|
-| N-5 | Notified flag types: `cpu:*`, `mem:*`, `write:*`, `budget:*`, `bundle:growth`, `bundle:rate`, `bundle:zst`, `partial:*`, `swap:streak`, `diag:*`. **`attr:vm?` does not notify** (tool-internal attribution confidence; stays in the TUI and log). |
+| N-5 | Notified flag types: `cpu:*`, `mem:*`, `wr:*`, `budget:*`, `bundle:growth`, `bundle:rate`, `bundle:zst`, `partial:*`, `swap:streak`, `diag:*`. **`attr:vm?` does not notify** (tool-internal attribution confidence; stays in the TUI and log). |
 | N-6 | Only the **`raised`** and **`event`** states notify. **`cleared`** does not. |
 | N-7 | **One notification per flag**: flags raised in the same poll are not merged, and per-role flags are not suppressed when the matching `total` flag also fires. |
 | N-8 | **Per-flag cooldown**: after a notification is sent for a flag ID, further `raised`/`event` transitions of the **same flag ID** within `--notify-cooldown` (default **300 s**) are not notified. They are still flagged in the TUI/stderr and logged as `suppressed_cooldown` (L-7). The cooldown is measured from the last *sent* notification for that ID. `diag:<file>` IDs are unique per report, so they are effectively never suppressed. The `b` key (v1 K-4) does **not** reset cooldowns. |
@@ -80,14 +80,14 @@ Other facts:
 
 | ID | Requirement |
 |---|---|
-| N-12 | Two tiers. **Critical**: `diag:*`, `budget:*`, `bundle:growth`, `bundle:rate`, `bundle:zst`, `partial:*`, and the unexpected-exit notification (N-14). **Warning**: `cpu:*`, `mem:*`, `write:*`, `swap:streak`. |
+| N-12 | Two tiers. **Critical**: `diag:*`, `budget:*`, `bundle:growth`, `bundle:rate`, `bundle:zst`, `partial:*`, and the unexpected-exit notification (N-14). **Warning**: `cpu:*`, `mem:*`, `wr:*`, `swap:streak`. |
 | N-13 | Critical plays sound **`Basso`**; warning plays sound **`Glass`**. |
 
 ### 4.5 Monitor lifecycle
 
 | ID | Requirement |
 |---|---|
-| N-14 | Notify (critical tier) when the monitor **exits unexpectedly**: an unhandled exception, or **SIGTERM** / **SIGHUP** (e.g. `kill`, a closed tmux pane or terminal). The body gives the reason and the log path, and warns that alerts have stopped. Not subject to the cooldown. |
+| N-14 | Notify (critical tier) when the monitor **exits unexpectedly**: an unhandled exception, or **SIGTERM** / **SIGHUP** (e.g. `kill`, a closed tmux pane or terminal). The body gives the reason and the log path, and warns that alerts have stopped. Not subject to the cooldown. Sent without waiting for confirmation, so shutdown is not delayed. |
 | N-15 | A **clean quit** (`q`, Ctrl-C / SIGINT) and monitor **start** do not notify. |
 | N-16 | SIGHUP gets a handler (v1 installs SIGINT and SIGTERM only) so that it performs the same clean shutdown as SIGTERM (flush log, restore terminal) in addition to N-14. SIGTERM continues to shut down cleanly but is now classed as unexpected. |
 | N-17 | SIGKILL and power loss cannot be caught; the README documents this limit. |
@@ -106,14 +106,14 @@ Other facts:
 | ID | Requirement |
 |---|---|
 | N-22 | A failed send (notifier cannot be launched, or exits non-zero) is logged (L-7) and produces **one warning per session**: in the TUI (e.g. in the header or flag area) or, headless, one stderr line. Later failures are logged only. |
-| N-23 | Failures never stop monitoring and never disable notifications; each subsequent flag still attempts a send. |
+| N-23 | Failures never stop monitoring and never disable notifications; each subsequent flag still attempts a send. Exception: if pync cannot be loaded at startup, notifications are unavailable for the session (nothing could be sent); this is warned once and logged (`notify:init`), and the TUI header shows `notify: off (unavailable)`. |
 | N-24 | The undetectable cases (notifications disabled for terminal-notifier in System Settings, Focus modes, Do Not Disturb) are documented in the README together with `--notify-test`. |
 
 ### 4.8 Logging
 
 | ID | Requirement |
 |---|---|
-| L-7 | New record type **`notification`** (v1 L-2 extended): flag `id`, `tier`, `title`, `subtitle`, `body`, and `status` = `sent` \| `suppressed_cooldown` \| `failed` (with `error` when failed). The unexpected-exit notification uses a reserved id (e.g. `monitor:exit`). Carries the v1 L-3 timestamp fields. |
+| L-7 | New record type **`notification`** (v1 L-2 extended): flag `id`, `tier`, `title`, `subtitle`, `body`, and `status` = `sent` \| `suppressed_cooldown` \| `failed` (with `error` when failed) \| `dispatched` (unexpected-exit notification only: launched without waiting, outcome unknown). The unexpected-exit notification uses a reserved id (e.g. `monitor:exit`). Carries the v1 L-3 timestamp fields. |
 | L-8 | The `session_start` record's config includes `notify` (on/off) and `notify_cooldown`. |
 
 ## 5. Notification wording (per flag type)
@@ -122,9 +122,9 @@ Values in `<>` are filled in at send time. The hint wording is a **proposal for 
 
 | Flag | Tier | Subtitle | Body line 1 | Body line 2 (hint) |
 |---|---|---|---|---|
-| `cpu:<role>` | warning | `High CPU — <role>` | `<avg>% of one core (<window> s avg) > <threshold>%` | `Baseline <baseline>%.` For `vm`: `Check ~/Library/Logs/Claude/cowork_vm_swift.log`; otherwise `Idle climb? See TUI role rows` |
+| `cpu:<role>` | warning | `High CPU — <role>` | `<avg>% of one core (<window> s avg) > <threshold>%` | `Baseline <baseline>%.` For `vm`: `See ~/Library/Logs/Claude/cowork_vm_swift.log`; otherwise `Idle climb? See TUI role rows` |
 | `mem:<role>` | warning | `Memory growth — <role>` | `5-min avg <avg> > baseline <baseline> + <pct>%` | `Slow-leak pattern; press b in TUI to re-baseline` |
-| `write:<role>` | warning | `High disk writes — <role>` | `<avg>/s (60 s avg) > <threshold>/s` | `Counts toward macOS 24 h write budget; --trace-io shows files` |
+| `wr:<role>` | warning | `High disk writes — <role>` | `<avg>/s (60 s avg) > <threshold>/s` | `Counts toward macOS 24 h budget; --trace-io shows files` |
 | `swap:streak` | warning | `Sustained swapping` | `Swap-outs up on 3 consecutive polls` | `Swap used <used>; check memory rows` |
 | `budget:2g` / `budget:8g` | critical | `Write budget <pct>% — <2 GiB\|8 GiB> tier` | `Total Claude wrote <bytes> in 24 h` | `macOS files a disk-writes .diag report at 100%` |
 | `bundle:growth` | critical | `VM bundle growth` | `+<growth> since start > <threshold>` | `rootfs.img is never trimmed; check sessiondata.img` |
