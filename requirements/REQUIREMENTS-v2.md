@@ -118,7 +118,7 @@ Other facts:
 
 ## 5. Notification wording (per flag type)
 
-Values in `<>` are filled in at send time. The hint wording is a **proposal for review** (§12, O-1).
+Values in `<>` are filled in at send time. The hint wording was accepted in O-1 (§12), and two hints were later shortened to fit the N-4 limits.
 
 | Flag | Tier | Subtitle | Body line 1 | Body line 2 (hint) |
 |---|---|---|---|---|

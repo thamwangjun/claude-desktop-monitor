@@ -146,6 +146,8 @@ At runtime only `NOTIFY_ICON.exists()` is checked; no dependency on Claude.app o
 - pync's `notify(..., wait=True)` inside the worker gives exit-status detection; no timeout on a single send (a hung send stalls only the worker and the notifications queued behind it, never sampling). Reviewed 2026-09-26: kept.
 - Eager `import pync` at startup when notifications are on; import failure → notifications off for the session, with a warning. Reviewed 2026-09-26.
 - Text limits: subtitle 40 chars, body lines 60 chars. Reviewed 2026-09-26; two §5 hints were reworded to fit.
+- Thumbnail at `assets/claude-icon.png`. Reviewed 2026-09-26.
+- `--notify-test` sample wording as above; exit 0 only if both sends succeed. Reviewed 2026-09-26.
 - A PATH `terminal-notifier` (e.g. Homebrew) takes precedence over pync's vendored copy; this is pync's behaviour and is left as is.
 
 ## Out of scope

@@ -56,9 +56,9 @@ Shutdown order in `run()`, on each unexpected path:
 1. `renderer.stop()` (restore the terminal first, as in v1).
 2. If notifications are enabled and pync loaded: `sender.fire_and_forget(exit_notification)` (Plan 09). This launches terminal-notifier from the main thread **without waiting**, bypassing both the cooldown policy and the worker queue (which may be busy or stuck). The child process completes even after the monitor exits.
 3. Log a `notification` record with **`status: "dispatched"`**: the outcome is unknown by design. This is a fourth L-7 status, used only for `monitor:exit`.
-4. Drain any results already reported by the worker and log them (no flush wait), then `session_end`, then close collectors, the sender and the log (v1 order otherwise).
+4. The shared shutdown step from Plan 10 (every shutdown, clean or not): `sender.flush(timeout=2)` for **flag** notifications still queued, then drain and log their results. Then `session_end`, then close collectors, the sender and the log (v1 order otherwise).
 
-Not waiting keeps shutdown as fast as v1's. That matters when a supervisor follows SIGTERM with SIGKILL after a few seconds.
+The exit notification itself is launched before the flush, so it goes out immediately even if a supervisor follows SIGTERM with SIGKILL a few seconds later. The flush only adds a delay (at most 2 s) when flag notifications are still queued; normally the queue is empty and there is no delay.
 
 A second SIGTERM/SIGHUP during this shutdown is ignored (the handlers only set state), so shutdown cannot be cut short into a half-written log.
 
@@ -88,7 +88,7 @@ The second header line gains `notify: on` / `notify: off` after `trace-io: …`.
 5. TUI header `notify:` field and warning line.
 6. Tests:
    - `tests/test_cli.py` / new `tests/test_lifecycle.py`: the handler sets the right reason per signal; SIGHUP left alone when inherited as `SIG_IGN`;
-   - `run()` with fake collectors and a fake sender: SIGTERM → `fire_and_forget` called once, `notification(status=dispatched)` + `session_end(signal=SIGTERM)` logged, no flush wait; `q` and SIGINT → no exit notification; injected exception → exit notification with the exception type, and the exception still propagates; `--no-notify` → no exit notification;
+   - `run()` with fake collectors and a fake sender: SIGTERM → `fire_and_forget` called once, `notification(status=dispatched)` + `session_end(signal=SIGTERM)` logged, and `fire_and_forget` is called before `flush`; `q` and SIGINT → no exit notification; injected exception → exit notification with the exception type, and the exception still propagates; `--no-notify` → no exit notification;
    - `tests/test_tui.py`: the header contains `notify: on` / `notify: off`, and the failing variant after `on_notify_warning`;
    - headless `on_notify_warning` prints exactly one line.
 

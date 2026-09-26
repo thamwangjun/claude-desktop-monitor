@@ -91,7 +91,7 @@ In `run()`:
 - When enabled, call `load_pync()` (Plan 09) once before monitoring starts. On failure: no sender and no policy for the session, and one `notification` record `{"id": "notify:init", "status": "failed", "error": …}` is written. `run()` keeps a `notify_state` of `on` / `off` / `unavailable` for Plan 11's header and warning.
 - In the existing `for event in flag_events` loop, after `log.write(flag)` and `renderer.on_flag`, call `policy.handle(event)` and log any returned record.
 - Each poll, after the flag loop: `for r in sender.drain_results(): log.write(notification_record(r))`. `sent` and `failed` records therefore come from the worker's results and are always written by the main thread (the LogWriter is not thread-safe).
-- At shutdown (`finally`): `sender.flush(timeout=2)`, drain and log the remaining results, then `sender.close()`. This only bounds how long already-queued flag notifications get to confirm. The unexpected-exit notification does not wait (Plan 11).
+- At shutdown (`finally`): `sender.flush(timeout=2)`, drain and log the remaining results, then `sender.close()`. This applies to **every** shutdown (clean quit, signal or exception) and only bounds how long already-queued flag notifications get to go out and confirm; normally the queue is empty. The unexpected-exit notification itself is fire-and-forget and is launched before this flush (Plan 11). Reviewed 2026-09-26.
 - `session_start.config` already contains `vars(args)` (`no_notify`, `notify_cooldown`); add an explicit `"notify": not args.no_notify` field (L-8).
 
 `notification` record:
