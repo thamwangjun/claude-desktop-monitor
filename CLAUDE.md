@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `monitor.py`: a macOS-only terminal tool that watches Claude Desktop's resource usage over time (especially the Cowork Linux VM), logs JSONL, raises flags against fixed rules, sends macOS notifications, and shows a `rich` TUI or runs headless. **Observability only.**
 
-`PLAN_EXEC_INSTRUCTIONS.md` is the full working guide (verified technical facts, hard rules, git rules, user-only checks). Read it before non-trivial changes. Docs by authority: `requirements/REQUIREMENTS-v1.md` → `requirements/REQUIREMENTS-v2.md` (v2 wins where it amends v1) → `plans/index.md` (status table, conventions) → `plans/NN-*.md`. If a plan conflicts with the requirements, stop and ask the user. v1 (plans 01–08) and v2 (09–12) are all done.
+`PLAN_EXEC_INSTRUCTIONS.md` is the full working guide (verified technical facts, hard rules, git rules, user-only checks). Read it before non-trivial changes. Docs by authority: `requirements/REQUIREMENTS-v1.md` → `REQUIREMENTS-v2.md` → `REQUIREMENTS-v3.md` (each later version wins where it amends an earlier one) → `plans/index.md` (status table, conventions) → `plans/NN-*.md`. If a plan conflicts with the requirements, stop and ask the user. v1 (plans 01–08) and v2 (09–12) are done; v3 (13–17, Homebrew distribution) is planned, not started. The commands and layout below are pre-v3 until plans 13 and 14 update them.
 
 ## Commands
 
