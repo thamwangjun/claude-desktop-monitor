@@ -18,7 +18,7 @@ The tool samples processes, disk footprint, swap and macOS diagnostic reports ev
 
 **v3** (plans 13–17) distributes it through **Homebrew**: the script becomes the package `claude_desktop_monitor` (`src/` layout, `uv_build`; done in Plan 13), logs default to `~/Library/Logs/claude-desktop-monitor/` (done in Plan 14), and a personal tap (`thamwangjun/homebrew-tap`, cloned at `../homebrew-tap`) ships an arm64 macOS 26 bottle. All of v3 is done: 0.3.0 is published with its bottle (Plan 17). Monitoring behaviour is unchanged.
 
-**v3.1** (plans 18–19) raises the default `--cpu-threshold` from 30 to 90 (% of one core, unchanged unit; clears below 81%) and ships it as 0.3.1 through the tap. At the new default the #22543 idle climb is seen via current vs. baseline rather than a flag (REQUIREMENTS-v3.1 §2).
+**v3.1** (plans 18–19) raises the default `--cpu-threshold` from 30 to 90 (% of one core, unchanged unit; clears below 81%) and ships it as 0.3.1 through the tap. At the new default the #22543 idle climb is seen via current vs. baseline rather than a flag (REQUIREMENTS-v3.1 §2). All of v3.1 is done: 0.3.1 is published with its bottle (Plan 19).
 
 It is observability only (see §7 Hard rules).
 
@@ -39,7 +39,7 @@ Plans:
 - **v1:** `01-scaffold`, `02-native-layer`, `03-processes`, `04-disk-footprint`, `05-system-signals`, `06-analysis-alerts`, `07-tui`, `08-readme-verification`. Default order is 01 → 08. Plans 02, 04 and 05 each depend only on 01. All are done.
 - **v2:** `09-notifier`, `10-notification-policy`, `11-lifecycle-ui`, `12-readme-verification`. **Strictly sequential**, 09 → 12: 10 and 11 both edit `run()` and the shutdown path. All are done.
 - **v3:** `13-package-conversion`, `14-runtime-changes`, `15-readme-release`, `16-formula-tap`, `17-v3-verification`. **Strictly sequential**, 13 → 17. Plans 15, 16 and 17 each end at a **user gate** (tag, PR, publish); the next plan can't start before it. All are done.
-- **v3.1:** `18-cpu-default`, `19-release-0.3.1`. **Strictly sequential**. 18 ends at the tag gate (`v0.3.1`), 19 at the publish gate. Neither is started.
+- **v3.1:** `18-cpu-default`, `19-release-0.3.1`. **Strictly sequential**. 18 ends at the tag gate (`v0.3.1`), 19 at the publish gate. All are done.
 
 ## 3. How to execute a plan (every session)
 
