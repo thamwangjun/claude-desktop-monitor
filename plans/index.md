@@ -272,7 +272,7 @@ Considered and rejected: merging 13 and 14 (the rename would carry behaviour cha
 
 | Plan | Status |
 |---|---|
-| 13 | Not started |
+| 13 | Done (8fd7972) — no code deviations. `git log --follow --oneline src/claude_desktop_monitor/monitor.py` shows the full v1/v2 history through the rename (100% similarity). All verification passed: `uv run pytest` (171 tests); `uv run claude-desktop-monitor --help`, `uv run python -m claude_desktop_monitor --help` and `mise run monitor -- --help` all print the same usage; a 15s headless run to `/tmp/cdm-p13.jsonl` + SIGINT produced a well-formed log (`session_start`, `sample`, `diag_report`, `session_end`); `monitor.NOTIFY_ICON.exists()` is `True` from the installed package; `uv build` produced one sdist and one wheel, with the wheel containing `claude_desktop_monitor/monitor.py` and `claude_desktop_monitor/assets/claude-icon.png` and the sdist containing `LICENSE`; `dist/` is gitignored. No `uv run monitor.py` remains in README.md, CLAUDE.md, PLAN_EXEC_INSTRUCTIONS.md or mise.toml. |
 | 14 | Not started |
 | 15 | Not started |
 | 16 | Not started |
