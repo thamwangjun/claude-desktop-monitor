@@ -1,6 +1,6 @@
 [project]
 name = "claude-desktop-monitor"
-version = "0.3.0"
+version = "0.3.1"
 description = "Watch Claude Desktop's resource usage over time: TUI, JSONL log, flags and macOS notifications"
 readme = "README.md"
 license = "GPL-3.0-only"

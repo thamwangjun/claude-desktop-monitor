@@ -126,6 +126,60 @@ def test_cpu_raise_and_clear_with_hysteresis():
     assert "cpu:total" in cleared_ids(all_events)
 
 
+def test_cpu_default_threshold_raise_and_clear():
+    threshold = monitor.parse_args([]).cpu_threshold
+    args = make_args(cpu_window=4, interval=1, cpu_threshold=threshold)
+    analyzer = monitor.Analyzer(args)
+    t = 0
+    all_events = []
+    # fill the window with a low value first so it becomes "full"
+    for _ in range(5):
+        sample = base_sample(elapsed=t, total={"cpu_pct": 5.0, "footprint": None, "rss": None,
+                                                 "write_rate": None, "read_rate": None, "write_delta": None})
+        _, events = analyzer.analyze(sample)
+        all_events += events
+        t += 1
+    assert "cpu:total" not in raised_ids(all_events)
+
+    # steady 89%: below the 90% default, must not raise
+    for _ in range(6):
+        sample = base_sample(elapsed=t, total={"cpu_pct": 89.0, "footprint": None, "rss": None,
+                                                 "write_rate": None, "read_rate": None, "write_delta": None})
+        _, events = analyzer.analyze(sample)
+        all_events += events
+        t += 1
+    assert "cpu:total" not in raised_ids(all_events)
+
+    # steady 91%: above the 90% default, must raise
+    for _ in range(6):
+        sample = base_sample(elapsed=t, total={"cpu_pct": 91.0, "footprint": None, "rss": None,
+                                                 "write_rate": None, "read_rate": None, "write_delta": None})
+        _, events = analyzer.analyze(sample)
+        all_events += events
+        t += 1
+    assert "cpu:total" in raised_ids(all_events)
+    details = by_id(all_events, "cpu:total")["details"]
+    assert details["avg"] > 90.0
+
+    # steady 82% for a full window and more: average stays above 81, must not clear
+    for _ in range(6):
+        sample = base_sample(elapsed=t, total={"cpu_pct": 82.0, "footprint": None, "rss": None,
+                                                 "write_rate": None, "read_rate": None, "write_delta": None})
+        _, events = analyzer.analyze(sample)
+        all_events += events
+        t += 1
+    assert "cpu:total" not in cleared_ids(all_events)
+
+    # drive the average down below the clear hysteresis (81)
+    for _ in range(8):
+        sample = base_sample(elapsed=t, total={"cpu_pct": 80.0, "footprint": None, "rss": None,
+                                                 "write_rate": None, "read_rate": None, "write_delta": None})
+        _, events = analyzer.analyze(sample)
+        all_events += events
+        t += 1
+    assert "cpu:total" in cleared_ids(all_events)
+
+
 # ── Memory growth with 32 MiB floor ──
 
 

@@ -67,7 +67,7 @@ Special values: **`n/a`** = the metric couldn't be read (e.g. a permission error
 
 | Issue | State | Metric |
 |---|---|---|
-| [#22543](https://github.com/anthropics/claude-code/issues/22543): Cowork creates 10GB VM bundle that severely degrades performance | Open | bundle size, CPU climb (idle 24% → 55%), swap-ins, `Cache/`/`Code Cache/` |
+| [#22543](https://github.com/anthropics/claude-code/issues/22543): Cowork creates 10GB VM bundle that severely degrades performance | Open | bundle size, CPU climb (idle 24% → 55%, seen via current vs. baseline at the default threshold), swap-ins, `Cache/`/`Code Cache/` |
 | [#65577](https://github.com/anthropics/claude-code/issues/65577): rootfs.img grows unboundedly, never reclaimed | Open | bundle growth, `sessiondata.img` |
 | [#37860](https://github.com/anthropics/claude-code/issues/37860): Cowork VM root partition 86% full on fresh image | Closed | `sessiondata.img` growth |
 | [#89869](https://github.com/anthropics/claude-code/issues/89869): VM provisioning writes 10.7 GB in 13 min | Open | write rate, 2 GiB/8 GiB budgets, `rootfs.img.zst` kept, non-sparse `rootfs.img`, `*.partial` |
@@ -81,7 +81,7 @@ Special values: **`n/a`** = the metric couldn't be read (e.g. a permission error
 
 - **Sustained bundle growth**: allocated bundle size rising across sessions and never falling back down points to the no-trim/no-GC pattern (#65577).
 - **`sessiondata.img` rising per session**: accumulating per-session data that's never cleaned up (#37860).
-- **CPU climb**: the idle baseline stays flat while the rolling average creeps upward over minutes (#22543). The `vm` role pinned above 100% while idle points to a stuck boot or a spin loop, not normal usage (#26194, #87794).
+- **CPU climb**: the idle baseline stays flat while the rolling average creeps upward over minutes (#22543). At the default threshold (90%), a climb like 24% → 55% doesn't raise a flag — watch current vs. baseline instead, or run with `--cpu-threshold 30` (or lower) to be alerted on it. The `vm` role pinned above 100% while idle points to a stuck boot or a spin loop, not normal usage (#26194, #87794).
 - **Swap-out streak**: real memory pressure. This is deliberately *not* the same signal as `psutil`'s `sin`/`sout`, which on macOS are ordinary file paging and fire constantly regardless of memory pressure.
 - **Write budget**: approaching 80% of the 2 GiB (or 8 GiB) tier predicts a macOS `disk writes` diagnostic report. Cross-check against the `.diag` reports shown in the Flags panel.
 - **Memory growth over baseline**: a role's or total's 5-minute average footprint climbing well above its own session-minimum baseline is the suspected slow-leak pattern — distinct from the VM's large-but-flat footprint (~1.9 GB), which sits well below any growth threshold once it settles.
@@ -91,7 +91,7 @@ Special values: **`n/a`** = the metric couldn't be read (e.g. a permission error
 
 | Signal | Rule | Default | Flag |
 |---|---|---|---|
-| CPU | per role / total 60 s avg > threshold | 30% of one core | `--cpu-threshold`, `--cpu-window` |
+| CPU | per role / total 60 s avg > threshold | 90% of one core | `--cpu-threshold`, `--cpu-window` |
 | VM bundle growth | allocated bundle size > start size + N | 1 GB | `--bundle-growth` |
 | VM bundle rate | allocated growth over 10 min > N | 100 MB / 10 min | `--bundle-rate` |
 | Bundle cache | `rootfs.img.zst` disappears or reappears | — | — |
@@ -111,7 +111,7 @@ CLI flags (`uv run claude-desktop-monitor --help`):
 |---|---|---|
 | `--interval SEC` | 3 | Poll interval (2–5) |
 | `--full-rescan SEC` | 300 | Periodic full directory rescan interval |
-| `--cpu-threshold PCT` | 30 | CPU alert threshold, % of one core |
+| `--cpu-threshold PCT` | 90 | CPU alert threshold, % of one core |
 | `--cpu-window SEC` | 60 | CPU rolling-average window |
 | `--write-threshold BYTES/S` | 1MB | Disk write alert threshold, bytes/s |
 | `--budget-warn PCT` | 80 | Warn at this % of each macOS 24h write budget |

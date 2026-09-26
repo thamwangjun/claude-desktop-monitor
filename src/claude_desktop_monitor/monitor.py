@@ -115,8 +115,8 @@ def build_parser() -> argparse.ArgumentParser:
                          help="poll interval in seconds, 2-5 (default 3)")
     parser.add_argument("--full-rescan", type=float, default=300.0,
                          help="periodic full directory rescan interval in seconds (default 300)")
-    parser.add_argument("--cpu-threshold", type=float, default=30.0,
-                         help="CPU alert threshold, %% of one core (default 30)")
+    parser.add_argument("--cpu-threshold", type=float, default=90.0,
+                         help="CPU alert threshold, %% of one core (default 90)")
     parser.add_argument("--cpu-window", type=float, default=60.0,
                          help="CPU rolling-average window in seconds (default 60)")
     parser.add_argument("--write-threshold", type=_size_arg, default=parse_size("1MB"),
@@ -1600,7 +1600,7 @@ class Analyzer:
 
     def __init__(self, args: argparse.Namespace | None = None):
         args = args or argparse.Namespace(
-            interval=3.0, cpu_threshold=30.0, cpu_window=60.0, write_threshold=parse_size("1MB"),
+            interval=3.0, cpu_threshold=90.0, cpu_window=60.0, write_threshold=parse_size("1MB"),
             budget_warn=80.0, mem_growth=50.0, bundle_growth=parse_size("1GB"), bundle_rate=parse_size("100MB"),
         )
         self.interval = args.interval

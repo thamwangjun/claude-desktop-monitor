@@ -78,7 +78,7 @@ def test_custom_log_path():
 def test_defaults():
     args = monitor.parse_args([])
     assert args.full_rescan == 300.0
-    assert args.cpu_threshold == 30.0
+    assert args.cpu_threshold == 90.0
     assert args.cpu_window == 60.0
     assert args.write_threshold == monitor.parse_size("1MB")
     assert args.budget_warn == 80.0

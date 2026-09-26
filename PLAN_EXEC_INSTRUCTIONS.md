@@ -194,7 +194,7 @@ Processes that match a naive "claude" name search but are **not** Claude Desktop
 
 ### The monitor's own log directory (from Plan 14)
 
-Default `--log` destination, with no `--log` given, is `~/Library/Logs/claude-desktop-monitor/monitor-<timestamp>.jsonl` (directory created if missing). This is the monitor's **own** directory, distinct from the read-only `~/Library/Logs/Claude/` above; it is not covered by the observability-only hard rule below. Unit tests still never write there — always pass `--log` under `tmp_path`. `session_start.versions.monitor` records the installed package version (`importlib.metadata.version("claude-desktop-monitor")`, `"unknown"` if not installed); the package version is 0.3.0.
+Default `--log` destination, with no `--log` given, is `~/Library/Logs/claude-desktop-monitor/monitor-<timestamp>.jsonl` (directory created if missing). This is the monitor's **own** directory, distinct from the read-only `~/Library/Logs/Claude/` above; it is not covered by the observability-only hard rule below. Unit tests still never write there — always pass `--log` under `tmp_path`. `session_start.versions.monitor` records the installed package version (`importlib.metadata.version("claude-desktop-monitor")`, `"unknown"` if not installed); the package version is 0.3.1.
 
 ## 7. Hard rules
 
